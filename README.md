@@ -1,4 +1,4 @@
-<img src="https://en.wikipedia.org/wiki/Tizen#/media/File:Tizen-Lockup-On-Light-RGB.png" >
+<img src="https://kalingatv.com/wp-content/uploads/2022/01/Tizen-app.jpg" >
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](http://mit-license.org)
 [![Platform](https://img.shields.io/badge/Platform-Indigo-blueviolet)](https://www.indigodomo.com/) 
