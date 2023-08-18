@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<PluginConfig>
+	<Field id="refresh_frequency" type="textfield" defaultValue="30">
+		<Label>Enter API Refresh Frequency in Seconds:</Label>
+	</Field>
+	<Field id="showDebugInfo" type="checkbox">
+		<Label>Enable debugging:</Label>
+		<Description>(recommended to turn off after specific debug)</Description>
+	</Field>
+</PluginConfig>

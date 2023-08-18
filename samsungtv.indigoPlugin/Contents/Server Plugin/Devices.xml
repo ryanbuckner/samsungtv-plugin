@@ -1,0 +1,78 @@
+<?xml version="1.0"?>
+<Devices>
+	<!-- Define some devices -->
+	<Device type="relay" id="televisions">
+
+	<Name>Samsung TV</Name>
+	<ConfigUI>
+		<SupportURL>https://forums.indigodomo.com/viewforum.php?f=363</SupportURL>
+		<Field id="ipaddress" type="textfield">
+                <Label>IP Address</Label>
+        </Field>
+        <Field id="port" type="textfield" defaultValue="8002">
+                <Label>Port</Label>
+        </Field>
+        <Field id="token" type="textfield" defaultValue="tv-token.txt">
+                <Label>Token File Name</Label>
+        </Field>
+	</ConfigUI>
+	<States>
+		<State id="name">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Name</TriggerLabel>
+			<ControlPageLabel>Name</ControlPageLabel>
+		</State>
+		<State id="macaddress">
+			<ValueType>String</ValueType>
+			<TriggerLabel>MAC Address</TriggerLabel>
+			<ControlPageLabel>MAC Address</ControlPageLabel>
+		</State>
+		<State id="model">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Model</TriggerLabel>
+			<ControlPageLabel>Model</ControlPageLabel>
+		</State>
+		<State id="status">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Name</TriggerLabel>
+			<ControlPageLabel>Name</ControlPageLabel>
+		</State>
+		<State id="device_id">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Device ID</TriggerLabel>
+			<ControlPageLabel>Device ID</ControlPageLabel>
+		</State>
+		<State id="os">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Operating System</TriggerLabel>
+			<ControlPageLabel>Operating System</ControlPageLabel>
+		</State>
+		<State id="tokenauthsupport">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Token Auth Support</TriggerLabel>
+			<ControlPageLabel>Token Auth Support</ControlPageLabel>
+		</State>
+		<State id="voicesupport">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Voice Support</TriggerLabel>
+			<ControlPageLabel>Voice Support</ControlPageLabel>
+		</State>
+		<State id="firmwareversion">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Firmware Version</TriggerLabel>
+			<ControlPageLabel>Firmware Version</ControlPageLabel>
+		</State>
+		<State id="networktype">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Network Type</TriggerLabel>
+			<ControlPageLabel>Network Type</ControlPageLabel>
+		</State>
+		<State id="type">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Type</TriggerLabel>
+			<ControlPageLabel>Type</ControlPageLabel>
+		</State>
+	</States>
+	<UiDisplayStateId>status</UiDisplayStateId>
+	</Device>
+</Devices>
