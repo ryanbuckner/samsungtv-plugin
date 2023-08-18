@@ -15,18 +15,18 @@ This Indigo Plugin provides a way to connect Indigo to your Samsung TVs with the
 
 Tizen is the Operating System on Samsung Smart TVs supported by this plugin
 
-###### Power State Monitoring
+##### Power State Monitoring
 Monitor the On/Off state of your TVs
 
-###### Toggle Power
+##### Toggle Power
 Turn your TVs on and off
 
-###### Custom States
+##### Custom States
 The following custom states are supported 
  TO DO 
 
 
-### The SamsuntTV Plugin
+### The SamsugtTV Plugin
 
 The plugin is a first MVP to support new models of Samsung TV in Indigo 
 
@@ -34,7 +34,7 @@ More informaton will be listed [on the GitHub Wiki](https://github.com/ryanbuckn
 
 This plugin is not endorsed or associated with Samsung 
 
-###### The plugin currently supports:
+##### The plugin currently supports:
 
 1) Support for multiple TVS with Tizon OS 
 2) On / Off state monitoring and control 
@@ -54,11 +54,11 @@ Required libraries:
 
 Future iterations of this plugin may include the library dependencies
 
-###### Plugin Config 
+##### Plugin Config 
 - configure the Plugin:
   - There are no Plugin config options other than the toggling of Debug
 
-###### Device Config 
+##### Device Config 
 - create a new device of Type Samsung TV
   - model should be Samsung TV
   - Name your device anything you want. It's preferred to use something indicating the name or location of the TV
