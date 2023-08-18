@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 
 <Actions>
-	<Action id="refresh_member_data" deviceFilter="self.televisions">
+	<Action id="refresh_tv_data" deviceFilter="self.televisions">
 		<Name>Refresh Data</Name>
 		<CallbackMethod>refresh_tv_data</CallbackMethod>
 	</Action>

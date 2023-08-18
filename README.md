@@ -1,118 +1,86 @@
-<img src="https://s2-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/400/245/300/resized/life360-horizontal-logo-trimmed.png?1558125703" >
+<img src="https://en.wikipedia.org/wiki/Tizen#/media/File:Tizen-Lockup-On-Light-RGB.png" >
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](http://mit-license.org)
 [![Platform](https://img.shields.io/badge/Platform-Indigo-blueviolet)](https://www.indigodomo.com/) 
 [![Language](https://img.shields.io/badge/Language-python%203.10-orange)](https://www.python.org/)
 [![Requirements](https://img.shields.io/badge/Requirements-Indigo%20v2022.1%2B-green)](https://www.indigodomo.com/downloads.html)
-![Releases](https://img.shields.io/github/release-date/ryanbuckner/life360-plugin?color=red&label=latest%20release)
+![Releases](https://img.shields.io/github/release-date/ryanbuckner/samsungtv-plugin?color=red&label=latest%20release)
 
 
-# Life360 Plugin for Indigo Domotics Home Automation
-## life360-indigo-plugin for Python3.10
-This Indigo Plugin provides a way to connect Indigo to your Life360.com family tracking information. This plugin is only supported for [Indigo Domotics Software ](http://www.indigodomo.com)
+# SamsungTV Plugin for Indigo Domotics Home Automation
+## samsungtv-indigo-plugin for Python3.10
+This Indigo Plugin provides a way to connect Indigo to your Samsung TVs with the Tizen OS. This plugin is only supported for [Indigo Domotics Software ](http://www.indigodomo.com)
 
-### What is Life360?
+### What is Tizen?
 
-Life360 is a mobile application referred to as a "family-oriented private social network". The app is a social network for families and differentiates itself in this way as it is not based around peer groups or professional networks such as Find My Friends and LinkedIn. It allows users to share locations, group messages, and call for roadside assistance. It has four main features: location sharing, circles, places, and premium.
+Tizen is the Operating System on Samsung Smart TVs supported by this plugin
 
-###### Location sharing
-The main feature of the app is location sharing. Users can open the app and see where other members are instantly. Users can choose to share or not their location with any particular circle at any particular time.
+###### Power State Monitoring
+Monitor the On/Off state of your TVs
 
-###### Circles
-Circles allows users to create separate groups within the app, e.g. "caregivers," "extended family," and "John's baseball team." Users' location is only visible to those who are also in the circle, and members in "caregivers" cannot see the location of users in "extended family," unless they are also in that circle.
+###### Toggle Power
+Turn your TVs on and off
 
-###### Places
-Places are a great way to know when your loved ones are leaving work or just arrived at school. Places are areas you can define so you are alerted when a Circle member enters or leaves a location. Some Places you might want to set up are work, home, and school. Free plans can set up two Places. To set up more Places, upgrade to a Premium plan.
+###### Custom States
+The following custom states are supported 
+ TO DO 
 
-###### Premium
-Life360 operates as a freemium app, and users can pay for extra features. These extra features include: stolen phone insurance, access to a live advisor 24/7, unlimited creation of "Places," and emergency roadside assistance (known as 'Driver Protect').
 
-###### Bubbles
-Life360 Bubbles is a new way to customize Location Sharing for your Circle. Bubbles is an optional feature and not a default setting. After a temporary Bubble is created, it shares only your approximate location while all safety and messaging features remain on. If a car crash or emergency is detected, Bubbles will automatically burst.
+### The SamsuntTV Plugin
 
-To stay connected with your family during Bubble time, you can message to request a Check-In for their exact location, or use the Message feature to communicate. If you are concerned about safety, you can burst a Bubble at any time.
+The plugin is a first MVP to support new models of Samsung TV in Indigo 
 
-More information can be found about Life360 [here](https://www.life360.com/support/popular-questions/)
+More informaton will be listed [on the GitHub Wiki](https://github.com/ryanbuckner/samsungtv-plugin/wiki)
 
-### The Life360 Plugin
-
-The plugin is my first attempt at an Indigo plugin, based on a script I wrote to update variables in Indigo. The Life360 api example was leveraged from the work done by [harperreed](https://github.com/harperreed/life360-python) 
-
-More informaton will be listed [on the GitHub Wiki](https://github.com/ryanbuckner/life360-plugin/wiki)
-
-This plugin is not endorsed or associated with Life360 
+This plugin is not endorsed or associated with Samsung 
 
 ###### The plugin currently supports:
 
-1) Support for only 1 Circle. This must be the first Circle in your account
-2) Multiple devices that each represent users in your Circle
+1) Support for multiple TVS with Tizon OS 
+2) On / Off state monitoring and control 
 3) Custom device states of the member device
   - Unique Member ID 
-  - First Name
-  - Last Name
-  - Phone Number 
-  - Email Address
-  - Avatar (http address) 
-  - Battery % 
-  - Battery is charging or not
-  - Latitude 
-  - Longitude
-  - Current Geofence
-  - Closest known address 
-  - Wifi turn on or not
-  - Is Driving (boolean determined by speed)
-  - Speed (raw Life360 speed * 2.2)
-  - Speed (in kph)
-  - Location Since Timestamp
-  - Last API update 
-4) Custom device states of the Life360 Custom Geofence
-  - Occupied
-  - Number of Members in Geofence 
-  - Members in Geofence
-  - Last Update Timestamp
-  - First Entered Timestamp
-  - Last Exited Timestamp 
+  - Model Number
+  - TV Name
+  - Connection Type 
 
 #### Installation
 
-Download the Life360.indigoPlugin file and double click it
+Download the SamsungTV.indigoPlugin file and double click it
+
+Required libraries: 
+- pip3 install samsungtvws
+- pip3 install wakeonlan
+
+Future iterations of this plugin may include the library dependencies
 
 ###### Plugin Config 
-- configure the Plugin by entering:
-  - Username: your life360 username (email address). Any account holder in the Circle can use their account. If you don't have a username or password, you can initiate a password change in the app 
-  - Password: your life360 password
-  - Authentication Token: Leave this value alone
-  - Refresh Rate: This is the time (in seconds) between API calls to refresh device states. It's recommended to keep this rate at 15 seconds or more
-
-The Plugin Config Dialog should not close unless your username and password are authenticated.  Check the Event Log for any errors. 
+- configure the Plugin:
+  - There are no Plugin config options other than the toggling of Debug
 
 ###### Device Config 
-- create a new device of Type life360
-  - model should be life360 Circle Member 
-  - Name your device anything you want. It's preferred to use something indicating the name of the person your device represents
+- create a new device of Type Samsung TV
+  - model should be Samsung TV
+  - Name your device anything you want. It's preferred to use something indicating the name or location of the TV
   - Press Edit Device Settings... 
-  - Choose the member that this device will represent from the dropdown list. If there is nothing in the dropdown, there maybe a problem with your username and password. Check the event log
+  - Enter the IP address of the TV
+  - Enter the port number if it differst from the standard 8002 default 
+  - Choose a unique name of the .txt file to save token info (eg 'tv-token.txt')
 
-###### Geofence Device Config 
-- create a new device of Type Life360 
-  - model should be Life360 Custom Geofence
-  - The geofence is a circle conprised of a center and a perimeter based on the radius (in Km) you enter
-  - You have the option to pre-populate the name, latitude, longitude, and radius from predefined Life360 app Places definition. Check the box that says "Use Life 360 Places". Choose the place from the dropdown and press the "populate" button
-  - The Geofence radius is defined in Kilometers. If you decide to use the Places option, it will be covered for you. If not, use the tool to convert from feet to Km
+* Note that the TV must be in developer mode with the IP Address of your Indigo server authorized 
+* The TV must be ON to communicate with it
 
 
-### Cautions:
+### Future Features:
 
-I am not an expert on Life360. 
-
-By using this version you are joining the testing team, thanks for the help.   I would love to hear your feedback and thoughts.
+Future features for this plugin will be community driven. Some ideas: 
+1) Launch app action 
+2) Send key command action
 
 ### Troubleshooting:
 
-- If someone changes their name in Life360, you will have to go into their device and reselect them from the dropdown if you make any other changes to the device.
-- member_is_driving is now a derived boolean based on the Life360 speed for that member. The raw isDriving status is always returned as 0, so it's ignored
-- The Life360 raw speed is a number that appears to be the actual speed in MPH divided by 2.2. This plugin attempts to correct that, but it's an estimate. -1 or 0 means not moving fast enough to register
-- The plugin will skip all updates for devices mapped to someone who has disabled or paused location sharing 
+- The plugin is unable to communicate with TVs when they are off. It will attempt to connect to the TV and if it cannot after 3 seconds, it makes the assumption that it's Off
+
 
 
 
