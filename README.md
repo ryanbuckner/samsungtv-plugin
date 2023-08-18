@@ -76,6 +76,9 @@ Future iterations of this plugin may include the library dependencies
 Future features for this plugin will be community driven. Some ideas: 
 1) Launch app action 
 2) Send key command action
+3) Frame TV control 
+4) Volume control 
+5) Input control 
 
 ### Troubleshooting:
 
