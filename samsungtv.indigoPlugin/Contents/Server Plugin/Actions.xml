@@ -6,6 +6,10 @@
 		<Name>Refresh Data</Name>
 		<CallbackMethod>refresh_tv_data</CallbackMethod>
 	</Action>
+	<Action id="toggleTVPower" deviceFilter="self.televisions">
+		<Name>Toggle TV On/Off</Name>
+		<CallbackMethod>toggleTVPower</CallbackMethod>
+	</Action>
    <Action id="sendCommand" deviceFilter="self.televisions">
         <Name>Send Command</Name>
         <CallbackMethod>sendCommand</CallbackMethod>
@@ -22,6 +26,12 @@
         			<Option value="right">Send Right Key</Option>
         			<Option value="enter">Send Enter Key</Option>
         			<Option value="back">Send Back Key</Option>
+        			<Option value="home">Send Home Key</Option>
+        			<Option value="menu">Send Menu Key</Option>
+        			<Option value="source">Send Source Key</Option>
+        			<Option value="guide">Send Guide Key</Option>
+        			<Option value="tools">Send Tools Key</Option>
+        			<Option value="info">Send Info Key</Option>
         		</List>
         	</Field>
        </ConfigUI>

@@ -184,6 +184,15 @@ class Plugin(indigo.PluginBase):
 	# Action Method
 	#############################
 
+	def toggleTVPower(self, device):
+		if (device.states["onOffState"] == "on"):
+			self.turnOffTV(device)
+		else:
+			self.turnOnTV(device)
+
+		return 
+
+
 	def turnOffTV(self, device):
 		ipaddress = device.pluginProps['ipaddress']
 		port = device.pluginProps['port']
@@ -252,6 +261,24 @@ class Plugin(indigo.PluginBase):
 
 			case "back":
 				success = self._back(device)
+
+			case "home":
+				success = self._home(device)
+
+			case "menu":
+				success = self._menu(device)
+
+			case "source":
+				success = self._source(device)
+
+			case "guide":
+				success = self._guide(device)
+
+			case "tools":
+				success = self._tools(device)
+
+			case "info":
+				success = self._info(device)
 
 		return 
 
@@ -365,6 +392,73 @@ class Plugin(indigo.PluginBase):
 			return False
 
 		return True
+
+
+	def _home(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().home()
+		except Exception as m:
+			self.logger.info("Home button call failed")
+			return False
+
+		return True
+
+
+	def _menu(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().menu()
+		except Exception as m:
+			self.logger.info("Menu button call failed")
+			return False
+
+		return True
+
+
+	def _source(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().source()
+		except Exception as m:
+			self.logger.info("Source button call failed")
+			return False
+
+		return True
+
+
+	def _guide(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().guide()
+		except Exception as m:
+			self.logger.info("Guide button call failed")
+			return False
+
+		return True
+
+
+	def _tools(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().tools()
+		except Exception as m:
+			self.logger.info("Tools button call failed")
+			return False
+
+		return True
+
+
+	def _info(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().info()
+		except Exception as m:
+			self.logger.info("Info button call failed")
+			return False
+
+		return True
+
 
 
 	########################################
