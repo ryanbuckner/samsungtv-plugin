@@ -7,7 +7,7 @@
 ![Releases](https://img.shields.io/github/release-date/ryanbuckner/samsungtv-plugin?color=red&label=latest%20release)
 
 
-# SamsungTV Plugin for Indigo Domotics Home Automation
+# Samsung TV Plugin for Indigo Domotics Home Automation
 ## samsungtv-indigo-plugin for Python3.10
 This Indigo Plugin provides a way to connect Indigo to your Samsung TVs with the Tizen OS. This plugin is only supported for [Indigo Domotics Software ](http://www.indigodomo.com)
 
@@ -32,7 +32,7 @@ Various custom states are supported
  
 
 
-### The SamsugtTV Plugin
+### The Samsung TV Plugin
 
 The plugin is a first MVP to support new models of Samsung TV in Indigo 
 
