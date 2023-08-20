@@ -36,14 +36,13 @@ class Plugin(indigo.PluginBase):
 		super(Plugin, self).__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
 		self.debug = pluginPrefs.get("showDebugInfo", False)
 		self.deviceList = []
-		self.path = '/Library/Application Support/Perceptive Automation/Python3-includes/'
+		self.pluginId = pluginId
+		self.pluginprefDirectory = '{}/Preferences/Plugins/com.ryanbuckner.indigoplugin.samsungtv'.format(indigo.server.getInstallFolderPath())
+		self.path = self.pluginprefDirectory + "/"
 		self.timeout = 3.0
 
 		try:
-			self.token_file = '/Library/Application Support/Perceptive Automation/Python3-includes/tv-token.txt'
-			self.ipaddress = self.pluginPrefs.get('ipaddress', None)
-			self.macaddress = self.pluginPrefs.get('mac', None)
-			self.refresh_frequency = self.pluginPrefs.get('port', '8002')
+			self.refresh_frequency = int(self.pluginPrefs.get('refresh_frequency', 30))
 			self.logger.debug("Success retrieving preferences from Plugin config")
 		except:
 			self.logger.error("Error retrieving Plugin preferences. Please use Configure to set")
@@ -53,6 +52,7 @@ class Plugin(indigo.PluginBase):
 		self.logger.info(u"{0:<30} {1}".format("Plugin name:", pluginDisplayName))
 		self.logger.info(u"{0:<30} {1}".format("Plugin version:", pluginVersion))
 		self.logger.info(u"{0:<30} {1}".format("Plugin ID:", pluginId))
+		self.logger.info(u"{0:<30} {1}".format("Token Path:", self.path))
 		self.logger.info(u"{0:<30} {1}".format("Refresh Frequency:", str(self.refresh_frequency) + " seconds"))
 		self.logger.info(u"{0:<30} {1}".format("Indigo version:", indigo.server.version))
 		self.logger.info(u"{0:<30} {1}".format("Python version:", sys.version.replace('\n', '')))
@@ -61,7 +61,12 @@ class Plugin(indigo.PluginBase):
 
 		self.samsungtvdata = {}
 
-
+		try:
+			if not os.path.exists(self.pluginprefDirectory):
+				os.makedirs(self.pluginprefDirectory)
+		except:
+			self.logger.error(u'Error accessing or creating tokens folder')
+		pass
 	########################################
 	def deviceStartComm(self, device):
 		self.logger.debug("Starting device: " + device.name)
@@ -82,7 +87,7 @@ class Plugin(indigo.PluginBase):
 	def runConcurrentThread(self):
 		self.logger.debug("Starting concurrent thread")
 		try:
-			pollingFreq = int(self.pluginPrefs['refresh_frequency']) * 1
+			pollingFreq = self.refresh_frequency
 		except:
 			pollingFreq = 30
 
@@ -147,25 +152,20 @@ class Plugin(indigo.PluginBase):
 		return (True, valuesDict)
 
 
-	# assigns the device.address to the value of the member.id
+	# assigns the device.address to the value 
 	def menuChanged(self, valuesDict = None, typeId = None, devId = None):
 		return valuesDict
 
+	def menu_callback(self, valuesDict, *args, **kwargs):  # typeId, devId):
+		self.logger.debug(f"Menu callback: returning valuesDict: \n {valuesDict}")
+		return valuesDict
 
 
 	########################################
 	# UI Validate, Plugin Preferences
 	########################################
-	def validatePrefsConfigUi(self, valuesDict):
-		
+	def validatePrefsConfigUi(self, valuesDict):		
 		return (True, valuesDict)
-
-
-	def get_member_list(self, filter="", valuesDict=None, typeId="", targetId=0):
-		if (len(self.member_list) == 0):
-			self.create_member_list()
-		retList = list(self.member_list.keys())
-		return retList
 
 
 	def toggleDebugging(self):
@@ -188,6 +188,7 @@ class Plugin(indigo.PluginBase):
 		ipaddress = device.pluginProps['ipaddress']
 		port = device.pluginProps['port']
 		token_file = self.path + device.pluginProps['token'] #device.pluginProps['token_file']
+		self.logger.debug(f"Token File: {token_file}")
 
 		if (device.states['status'] == "on"):
 			self.logger.debug("Turning off device")
@@ -218,6 +219,153 @@ class Plugin(indigo.PluginBase):
 			return False
 
 		return True
+	
+
+	def sendCommand(self, pluginAction, device, callerWaitingForResult):
+		self.logger.debug(f"When creating the Action, here's the device {device.name}")
+		#action = str(pluginAction.props.get(u"commandCode"))
+		
+		match pluginAction.props["commandCode"]:
+			case 'mute':
+				success = self._mute(device)
+
+			case "volume_up":
+				success = self._volumeUp(device)
+
+			case "volume_down":
+				success = self._volumeDown(device)
+
+			case "up":
+				success = self._up(device)
+
+			case "down":
+				success = self._down(device)
+
+			case "left":
+				success = self._left(device)
+
+			case "right":
+				success = self._right(device)
+
+			case "enter":
+				success = self._enter(device)
+
+			case "back":
+				success = self._back(device)
+
+		return 
+
+	def _getTV(self, device):
+		ipaddress = device.pluginProps['ipaddress']
+		port = device.pluginProps['port']
+		token_file = self.path + device.pluginProps['token']
+
+		try:
+			tv = samsungtvws.SamsungTVWS(host=ipaddress, port=8002, token_file=token_file, timeout=self.timeout)
+		except Exception as m:
+			self.logger.debug("Failed to connect to TV")
+			return False
+
+		return tv
+
+
+	def _mute(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().mute()
+		except Exception as m:
+			self.logger.info("Mute call failed")
+			return False
+
+		return True
+
+	def _volumeUp(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().volume_up()
+		except Exception as m:
+			self.logger.info("Volume Up call failed")
+			return False
+
+		return True
+
+
+	def _volumeDown(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().volume_down()
+		except Exception as m:
+			self.logger.info("Volume Down call failed")
+			return False
+
+		return True
+
+
+	def _up(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().up()
+		except Exception as m:
+			self.logger.info("Up button call failed")
+			return False
+
+		return True
+
+
+	def _down(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().down()
+		except Exception as m:
+			self.logger.info("Down button call failed")
+			return False
+
+		return True
+
+
+	def _left(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().left()
+		except Exception as m:
+			self.logger.info("Left button call failed")
+			return False
+
+		return True
+
+
+	def _right(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().right()
+		except Exception as m:
+			self.logger.info("Right button call failed")
+			return False
+
+		return True
+
+
+	def _enter(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().enter()
+		except Exception as m:
+			self.logger.info("Enter button call failed")
+			return False
+
+		return True
+
+
+	def _back(self, device):
+		try:
+			tv = self._getTV(device)
+			tv.shortcuts().back()
+		except Exception as m:
+			self.logger.info("Back button call failed")
+			return False
+
+		return True
+
 
 	########################################
 	# Relay / Dimmer Action callback
@@ -227,14 +375,15 @@ class Plugin(indigo.PluginBase):
 		if action.deviceAction == indigo.kDeviceAction.TurnOn:
 			# Command hardware module (dev) to turn ON here:
 			# ** IMPLEMENT ME **
-			send_success = True        # Set to False if it failed.
-			self.turnOnTV(dev)
+			#send_success = True        # Set to False if it failed.
+			send_success = self.turnOnTV(dev)
 			if send_success:
 				# If success then log that the command was successfully sent.
 				self.logger.info(f"sent \"{dev.name}\" on")
 
 				# And then tell the Indigo Server to update the state.
 				dev.updateStateOnServer("onOffState", "on")
+				dev.updateStateOnServer("status", "on")
 			else:
 				# Else log failure but do NOT update state on Indigo Server.
 				self.logger.error(f"send \"{dev.name}\" on failed")
@@ -243,8 +392,8 @@ class Plugin(indigo.PluginBase):
 		elif action.deviceAction == indigo.kDeviceAction.TurnOff:
 			# Command hardware module (dev) to turn OFF here:
 			# ** IMPLEMENT ME **
-			self.turnOffTV(dev)
-			send_success = True        # Set to False if it failed.
+			send_success = self.turnOffTV(dev)
+			#send_success = True        # Set to False if it failed.
 
 			if send_success:
 				# If success then log that the command was successfully sent.
@@ -252,6 +401,7 @@ class Plugin(indigo.PluginBase):
 
 				# And then tell the Indigo Server to update the state:
 				dev.updateStateOnServer("onOffState", "off")
+				dev.updateStateOnServer("status", "off")
 			else:
 				# Else log failure but do NOT update state on Indigo Server.
 				self.logger.error(f"send \"{dev.name}\" off failed")
@@ -294,13 +444,14 @@ class Plugin(indigo.PluginBase):
 			tvState = info['device']['PowerState'].lower()
 			self.logger.debug(f"Power state of {device.name}: {tvState}")
 		except Exception as m:
-			self.logger.debug(f"Camnot reach device {device.address}. Skipping...")
+			self.logger.debug(f"Cannot reach device {device.address}. Skipping...")
 			device.updateStateOnServer("status", "off")
 			device.updateStateOnServer("onOffState", "off")
 			device.updateStateImageOnServer(indigo.kStateImageSel.SensorOff)
 			return
 
 		self.logger.debug(f"Capturing all custom states for {device.name}...")
+		device.updateStateImageOnServer(indigo.kStateImageSel.SensorOn)
 		device_states.append({'key': 'status','value': tvState })
 		device_states.append({'key': 'onOffState','value': 'on' })
 		device_states.append({'key': 'name','value': info['device']['name'] })	
@@ -313,9 +464,7 @@ class Plugin(indigo.PluginBase):
 		device_states.append({'key': 'firmwareversion','value': info['device']['firmwareVersion'] })
 		device_states.append({'key': 'networktype','value': info['device']['networkType'] })
 		device_states.append({'key': 'type','value': info['type']})
-		device.updateStateImageOnServer(indigo.kStateImageSel.SensorOn)
 		
-
 		device.updateStatesOnServer(device_states)
 
 		return

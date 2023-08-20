@@ -1,8 +1,30 @@
 <?xml version="1.0"?>
 
 <Actions>
+	<SupportURL>https://forums.indigodomo.com/</SupportURL>
 	<Action id="refresh_tv_data" deviceFilter="self.televisions">
 		<Name>Refresh Data</Name>
 		<CallbackMethod>refresh_tv_data</CallbackMethod>
 	</Action>
+   <Action id="sendCommand" deviceFilter="self.televisions">
+        <Name>Send Command</Name>
+        <CallbackMethod>sendCommand</CallbackMethod>
+        <ConfigUI>
+        	<Field id="commandCode" type="menu">
+        		<Label>Command:</Label>
+        		<List>
+        			<Option value="mute">Mute</Option>
+        			<Option value="volume_up">Volume Up</Option>
+        			<Option value="volume_down">Volume Down</Option>
+        			<Option value="up">Send Up Key</Option>
+        			<Option value="down">Send Down Key</Option>
+        			<Option value="left">Send Left Key</Option>
+        			<Option value="right">Send Right Key</Option>
+        			<Option value="enter">Send Enter Key</Option>
+        			<Option value="back">Send Back Key</Option>
+        		</List>
+        	</Field>
+       </ConfigUI>
+    </Action>
 </Actions>
+

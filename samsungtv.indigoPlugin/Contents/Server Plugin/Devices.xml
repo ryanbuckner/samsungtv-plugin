@@ -72,6 +72,7 @@
 			<TriggerLabel>Type</TriggerLabel>
 			<ControlPageLabel>Type</ControlPageLabel>
 		</State>
+		
 	</States>
 	<UiDisplayStateId>status</UiDisplayStateId>
 	</Device>
