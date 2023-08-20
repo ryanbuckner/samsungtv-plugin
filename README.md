@@ -21,9 +21,15 @@ Monitor the On/Off state of your TVs
 ##### Toggle Power
 Turn your TVs on and off
 
+##### Navigation Buttons
+Send Up, Down, Left, Right etc. buttons
+
+##### Volume Controls
+Sernd up, down, mute 
+
 ##### Custom States
-The following custom states are supported 
- TO DO 
+Various custom states are supported 
+ 
 
 
 ### The SamsugtTV Plugin
@@ -36,9 +42,11 @@ This plugin is not endorsed or associated with Samsung
 
 ##### The plugin currently supports:
 
-1) Support for multiple TVS with Tizon OS 
+1) Support for multiple Samsung TVS (with Tizen OS)
 2) On / Off state monitoring and control 
-3) Custom device states of the member device
+3) Volume Up , Down , and Mute
+4) Navigation Up , Down, Left, Right, Back, Enter
+5) Custom device states of the member device
   - Unique Member ID 
   - Model Number
   - TV Name
@@ -48,11 +56,6 @@ This plugin is not endorsed or associated with Samsung
 
 Download the SamsungTV.indigoPlugin file and double click it
 
-Required libraries: 
-- pip3 install samsungtvws
-- pip3 install wakeonlan
-
-Future iterations of this plugin may include the library dependencies
 
 ##### Plugin Config 
 - configure the Plugin:
@@ -68,21 +71,21 @@ Future iterations of this plugin may include the library dependencies
   - Choose a unique name of the .txt file to save token info (eg 'tv-token.txt')
 
 * Note that the TV must be in developer mode with the IP Address of your Indigo server authorized 
-* The TV must be ON to communicate with it
+* The TV must be ON to communicate with it. Turn on the TV when adding it to Indigo
 
 
 ### Future Features:
 
 Future features for this plugin will be community driven. Some ideas: 
 1) Launch app action 
-2) Send key command action
-3) Frame TV control 
-4) Volume control 
-5) Input control 
+2) Frame TV control 
+3) Input control 
 
 ### Troubleshooting:
 
 - The plugin is unable to communicate with TVs when they are off. It will attempt to connect to the TV and if it cannot after 3 seconds, it makes the assumption that it's Off
+- When configuring new devices, turn the device on
+- Some TVs may go into standby mode before switching from On to Off. This may result in a few second delay of the Indigo state to become Off
 
 
 
