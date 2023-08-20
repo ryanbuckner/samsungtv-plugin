@@ -25,7 +25,7 @@ Turn your TVs on and off
 Send Up, Down, Left, Right etc. buttons
 
 ##### Volume Controls
-Sernd up, down, mute 
+Send up, down, mute 
 
 ##### Custom States
 Various custom states are supported 
