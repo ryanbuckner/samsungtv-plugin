@@ -500,11 +500,6 @@ class Plugin(indigo.PluginBase):
 				# Else log failure but do NOT update state on Indigo Server.
 				self.logger.error(f"send \"{dev.name}\" off failed")
 
-	#dump JSON to event log
-	def write_json_to_log(self):
-		self.logger.debug("TV data has been written to the debug Log. If you did not see it you may need to enable debugging in the Plugin Config UI")
-		return
-
 
 	def refresh_tv_data(self,pluginAction, device):
 		self.updatedevicestates(device)
