@@ -110,6 +110,105 @@ Discovery does not add devices automatically — use the found IP address to man
 
 ---
 
+### Plugin Scripting
+
+You can control Samsung TVs from Indigo's built-in scripting shell (**Plugins → Open Scripting Shell**) or from any Indigo Python script/schedule.
+
+#### Get a reference to the plugin and a TV device
+
+```python
+plugin = indigo.server.getPlugin("com.ryanbuckner.indigoplugin.samsungtv")
+tv     = indigo.devices["Living Room TV"]   # use your device name
+```
+
+#### Read device states
+
+```python
+print(tv.onState)                    # True / False
+print(tv.states["volumeLevel"])      # 0–100
+print(tv.states["currentApp"])       # e.g. "Netflix"
+print(tv.states["currentSource"])    # e.g. "HDMI 1"
+print(tv.states["macaddress"])
+print(tv.states["model"])
+```
+
+#### Power on / off
+
+```python
+# Turn on (Wake-on-LAN)
+plugin.executeAction("turnOnTV", deviceId=tv.id)
+
+# Turn off
+plugin.executeAction("turnOffTV", deviceId=tv.id)
+
+# Toggle
+plugin.executeAction("toggleTVPower", deviceId=tv.id)
+```
+
+#### Volume
+
+```python
+# Step up or down by 1
+plugin.executeAction("volumeUp",   deviceId=tv.id)
+plugin.executeAction("volumeDown", deviceId=tv.id)
+
+# Set an absolute level (0–100)
+plugin.executeAction("setVolume", deviceId=tv.id,
+                     props={"volumeLevel": "25"})
+```
+
+#### Send a remote button
+
+```python
+# Pick any value from the sendCommand action dropdown
+plugin.executeAction("sendCommand", deviceId=tv.id,
+                     props={"commandCode": "mute"})
+
+# Or send any Samsung key code directly
+plugin.executeAction("sendKeyCode", deviceId=tv.id,
+                     props={"keyCode": "KEY_RED"})
+```
+
+#### Switch input source
+
+```python
+plugin.executeAction("selectSource", deviceId=tv.id,
+                     props={"sourceId": "HDMI 1"})
+# Valid values: "TV", "HDMI 1", "HDMI 2", "HDMI 3", "HDMI 4", "AV", "Component"
+```
+
+#### Launch an app
+
+```python
+plugin.executeAction("launchApp", deviceId=tv.id,
+                     props={"appName": "Netflix"})
+# Valid values: Netflix, YouTube TV, YouTube, Prime Video, Disney+,
+#               Hulu, Spotify, Plex, Apple TV, HBO Max, Peacock,
+#               Paramount+, ESPN, Tubi, Crunchyroll, TV Plus, Samsung Internet
+```
+
+#### Force a state refresh
+
+```python
+plugin.executeAction("refresh_tv_data", deviceId=tv.id)
+```
+
+#### Example: movie-night scene
+
+```python
+plugin = indigo.server.getPlugin("com.ryanbuckner.indigoplugin.samsungtv")
+tv     = indigo.devices["Living Room TV"]
+
+if not tv.onState:
+    plugin.executeAction("turnOnTV", deviceId=tv.id)
+    indigo.server.sleep(8)              # wait for TV to boot
+
+plugin.executeAction("selectSource", deviceId=tv.id, props={"sourceId": "HDMI 1"})
+plugin.executeAction("setVolume",    deviceId=tv.id, props={"volumeLevel": "20"})
+```
+
+---
+
 ### Troubleshooting
 
 - The plugin polls over the local network. The TV must be reachable from the Indigo server.

@@ -249,41 +249,75 @@ class Plugin(indigo.PluginBase):
 	def discoverSamsungTVs(self):
 		SSDP_ADDR = "239.255.255.255"
 		SSDP_PORT = 1900
-		SSDP_MX   = 3
-		ST        = "urn:samsung.com:device:RemoteControlReceiver:1"
+		SSDP_MX   = 4
 
-		msg = "\r\n".join([
-			"M-SEARCH * HTTP/1.1",
-			f"HOST: {SSDP_ADDR}:{SSDP_PORT}",
-			'MAN: "ssdp:discover"',
-			f"MX: {SSDP_MX}",
-			f"ST: {ST}",
-			"", ""
-		])
+		# Multiple STs maximize coverage across Samsung firmware versions.
+		# ssdp:all catches everything; the narrow ST catches older models that only respond to it.
+		search_targets = [
+			"ssdp:all",
+			"upnp:rootdevice",
+			"urn:samsung.com:device:RemoteControlReceiver:1",
+		]
 
-		self.logger.info("Scanning network for Samsung TVs — this takes about 4 seconds...")
+		self.logger.info("Scanning network for Samsung TVs — this takes about 6 seconds...")
 
-		found = {}
-		try:
-			sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-			sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-			sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-			sock.settimeout(SSDP_MX + 1)
-			sock.sendto(msg.encode(), (SSDP_ADDR, SSDP_PORT))
-			while True:
-				try:
-					_, addr = sock.recvfrom(2048)
-					found[addr[0]] = True
-				except socket.timeout:
-					break
-		except Exception as exc:
-			self.logger.error(f"SSDP discovery failed: {exc}")
-			return
-		finally:
+		candidate_ips = set()
+
+		for st in search_targets:
+			msg = "\r\n".join([
+				"M-SEARCH * HTTP/1.1",
+				f"HOST: {SSDP_ADDR}:{SSDP_PORT}",
+				'MAN: "ssdp:discover"',
+				f"MX: {SSDP_MX}",
+				f"ST: {st}",
+				"", ""
+			])
 			try:
-				sock.close()
+				sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+				sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+				sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
+				sock.settimeout(SSDP_MX + 1)
+
+				# Bind to the local interface so multicast egresses on the right NIC (important on macOS)
+				try:
+					local_ip = socket.gethostbyname(socket.gethostname())
+					sock.bind((local_ip, 0))
+				except Exception:
+					pass
+
+				sock.sendto(msg.encode(), (SSDP_ADDR, SSDP_PORT))
+
+				while True:
+					try:
+						data, addr = sock.recvfrom(4096)
+						response = data.decode('utf-8', errors='ignore').lower()
+						if 'samsung' in response:
+							candidate_ips.add(addr[0])
+							self.logger.debug(f"SSDP: samsung device at {addr[0]} (ST={st})")
+					except socket.timeout:
+						break
+			except Exception as exc:
+				self.logger.debug(f"SSDP search for '{st}' failed: {exc}")
+			finally:
+				try:
+					sock.close()
+				except Exception:
+					pass
+
+		if not candidate_ips:
+			self.logger.info("No Samsung TVs found. Make sure TVs are powered on and on the same network segment.")
+			return
+
+		# Confirm each candidate is actually a Samsung TV by querying its REST API
+		found = {}
+		for ip in candidate_ips:
+			try:
+				tv   = samsungtvws.SamsungTVWS(host=ip, port=8002, token_file=self.path + "discovery-temp.txt", timeout=2.0)
+				info = tv.rest_device_info().get('device', {})
+				found[ip] = info
+				self.logger.debug(f"Validated Samsung TV at {ip}: {info.get('modelName', 'unknown')}")
 			except Exception:
-				pass
+				self.logger.debug(f"Could not validate {ip} via REST API — skipping")
 
 		if not found:
 			self.logger.info("No Samsung TVs found. Make sure TVs are powered on and on the same network segment.")
@@ -296,18 +330,13 @@ class Plugin(indigo.PluginBase):
 		}
 
 		self.logger.info("{0:=^130}".format(f" Discovered {len(found)} Samsung TV(s) "))
-		for ip in found:
+		for ip, info in found.items():
 			status = "(already configured)" if ip in configured_ips else "(not yet configured)"
 			self.logger.info(f"  IP Address:  {ip}  {status}")
-			try:
-				tv   = samsungtvws.SamsungTVWS(host=ip, port=8002, token_file=self.path + "discovery-temp.txt", timeout=2.0)
-				info = tv.rest_device_info().get('device', {})
-				self.logger.info(f"  Name:        {info.get('name', 'unknown')}")
-				self.logger.info(f"  Model:       {info.get('modelName', 'unknown')}")
-				self.logger.info(f"  OS:          {info.get('OS', 'unknown')}")
-				self.logger.info(f"  MAC:         {info.get('wifiMac', 'unknown')}")
-			except Exception:
-				self.logger.info("  (Could not query device details — TV may need to be woken first)")
+			self.logger.info(f"  Name:        {info.get('name', 'unknown')}")
+			self.logger.info(f"  Model:       {info.get('modelName', 'unknown')}")
+			self.logger.info(f"  OS:          {info.get('OS', 'unknown')}")
+			self.logger.info(f"  MAC:         {info.get('wifiMac', 'unknown')}")
 			self.logger.info("{0:-^130}".format(""))
 		self.logger.info("{0:=^130}".format(""))
 
@@ -463,7 +492,7 @@ class Plugin(indigo.PluginBase):
 				dev.updateStateOnServer("status", "on")
 			else:
 				self.logger.error(f"send \"{dev.name}\" on failed")
-				self.logger.info(f"Verify the IP address for \"{dev.name}\" ({dev.pluginProps.get('ipaddress', 'unknown')}) has not changed")
+				self.logger.info(f"Verify the IP address for \"{dev.name}\" ({dev.pluginProps.get('ipaddress', 'unknown')}) has not changed and remote permissions have been allowed")
 
 		elif action.deviceAction == indigo.kDeviceAction.TurnOff:
 			send_success = self.turnOffTV(dev)
