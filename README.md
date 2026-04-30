@@ -62,7 +62,7 @@ Download `SamsungTV.indigoPlugin` and double-click it to install.
 
 > The TV must be powered on the first time you add it so the plugin can obtain a WebSocket token and discover the MAC address for Wake-on-LAN.
 
-> Developer mode is required on the TV. Authorize the IP address of your Indigo server when prompted on-screen.
+> Developer mode is required on the TV. Authorize the IP address of your Indigo server when prompted on-screen. See [Samsung's official instructions for enabling Developer Mode](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/tv-device.html).
 
 ---
 

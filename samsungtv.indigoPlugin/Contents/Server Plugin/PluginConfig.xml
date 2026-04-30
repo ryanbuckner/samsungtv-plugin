@@ -3,4 +3,12 @@
 	<Field id="refresh_frequency" type="textfield" defaultValue="30">
 		<Label>Enter API Refresh Frequency in Seconds:</Label>
 	</Field>
+	<Field id="debugLevel" type="menu" defaultValue="off">
+		<Label>Debug Logging:</Label>
+		<List>
+			<Option value="off">Critical</Option>
+			<Option value="debug">Debug</Option>
+			<Option value="detailed">Detailed State Logging</Option>
+		</List>
+	</Field>
 </PluginConfig>

@@ -61,8 +61,9 @@ class Plugin(indigo.PluginBase):
 	# ---------------------------------------------------------------------------
 	def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs):
 		super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
-		self.debug = pluginPrefs.get("showDebugInfo", False)
-		self.detailedDebug = pluginPrefs.get("showDetailedDebugInfo", False)
+		level = pluginPrefs.get("debugLevel", "off")
+		self.debug         = level in ("debug", "detailed")
+		self.detailedDebug = level == "detailed"
 		# dict keyed by device.id → {"retryCount": int, "lastUpdate": str|None}
 		self.deviceList = {}
 		self.pluginId = pluginId
@@ -201,6 +202,7 @@ class Plugin(indigo.PluginBase):
 	def closedPrefsConfigUi(self, valuesDict, userCancelled):
 		if not userCancelled:
 			self.refresh_frequency = int(valuesDict.get('refresh_frequency', 30))
+			self._applyDebugLevel(valuesDict.get('debugLevel', 'off'))
 
 	def menuChanged(self, valuesDict=None, typeId=None, devId=None):
 		return valuesDict
@@ -210,27 +212,39 @@ class Plugin(indigo.PluginBase):
 		return valuesDict
 
 	# ---------------------------------------------------------------------------
+	# Debug helpers
+	# ---------------------------------------------------------------------------
+	def _applyDebugLevel(self, level):
+		self.debug         = level in ("debug", "detailed")
+		self.detailedDebug = level == "detailed"
+		self.pluginPrefs["debugLevel"] = level
+
+	# ---------------------------------------------------------------------------
 	# Debug toggles (Plugins menu)
 	# ---------------------------------------------------------------------------
 	def toggleDebugging(self):
-		if self.debug:
-			self.debug = False
-			self.pluginPrefs['showDebugInfo'] = False
-			self.logger.info("Debug logging turned off")
+		current = self.pluginPrefs.get("debugLevel", "off")
+		if current == "off":
+			self._applyDebugLevel("debug")
+			self.logger.info("Debug logging turned on")
 		else:
-			self.debug = True
-			self.pluginPrefs['showDebugInfo'] = True
-			self.logger.debug("Debug logging turned on")
+			self._applyDebugLevel("off")
+			self.logger.info("Debug logging turned off")
 
 	def toggleDetailedDebugging(self):
-		if self.detailedDebug:
-			self.detailedDebug = False
-			self.pluginPrefs['showDetailedDebugInfo'] = False
-			self.logger.info("Detailed state logging turned off")
+		current = self.pluginPrefs.get("debugLevel", "off")
+		if current == "detailed":
+			self._applyDebugLevel("debug")
+			self.logger.info("Detailed state logging turned off (debug logging still on)")
 		else:
-			self.detailedDebug = True
-			self.pluginPrefs['showDetailedDebugInfo'] = True
-			self.logger.info("Detailed state logging turned on")
+			self._applyDebugLevel("detailed")
+			self.logger.info("Detailed state logging turned on — polling all TVs now...")
+			for devId in list(self.deviceList.keys()):
+				if devId in indigo.devices:
+					try:
+						self.updatedevicestates(indigo.devices[devId])
+					except Exception:
+						self.logger.exception(f"Error polling device {devId}")
 
 	def listDeviceInfo(self):
 		devices = [d for d in indigo.devices.iter("self") if d.deviceTypeId == "televisions"]
@@ -400,6 +414,14 @@ class Plugin(indigo.PluginBase):
 		if volume is not None:
 			self.logger.debug(f"Volume for {device.name}: {volume}")
 
+		# If an app is running the TV is on the Smart Hub, not a physical input.
+		# Only overwrite currentSource when we can determine it; otherwise leave it
+		# as whatever Indigo last set via selectSource so HDMI state persists.
+		if current_app:
+			current_source = "Smart Hub"
+		else:
+			current_source = device.states.get("currentSource", "Smart Hub") or "Smart Hub"
+
 		device_states = [
 			{'key': 'status',          'value': tvState},
 			{'key': 'onOffState',      'value': tvState == 'on'},
@@ -414,15 +436,16 @@ class Plugin(indigo.PluginBase):
 			{'key': 'networktype',     'value': info['device'].get('networkType', '')},
 			{'key': 'type',            'value': info.get('type', '')},
 			{'key': 'currentApp',      'value': current_app},
+			{'key': 'currentSource',   'value': current_source},
 		]
 		if volume is not None:
 			device_states.append({'key': 'volumeLevel', 'value': volume})
 
 		if self.detailedDebug:
-			self.logger.debug(f"--- States for {device.name} ---")
+			self.logger.info(f"--- States for {device.name} ---")
 			for state in device_states:
-				self.logger.debug(f"  {state['key']:<20} = {state['value']}")
-			self.logger.debug(f"--- End states for {device.name} ---")
+				self.logger.info(f"  {state['key']:<20} = {state['value']}")
+			self.logger.info(f"--- End states for {device.name} ---")
 
 		device.updateStatesOnServer(device_states)
 		device.updateStateImageOnServer(
@@ -434,14 +457,28 @@ class Plugin(indigo.PluginBase):
 			self.deviceList[device.id]['retryCount'] = 0
 
 	def _getCurrentApp(self, tv):
-		"""Poll the TV for a running app from COMMON_APPS. Returns app name or empty string."""
+		"""Poll the TV for the foreground app from COMMON_APPS. Returns app name or empty string.
+
+		Two-pass strategy: visible (foreground) takes priority over running (background/cached)
+		so that an app like YouTube sitting in the background doesn't shadow the active app.
+		"""
+		statuses = {}
 		for app_name, app_id in COMMON_APPS.items():
 			try:
-				status = tv.rest_app_status(app_id)
-				if status and (status.get('visible') or status.get('running')):
-					return app_name
+				statuses[app_name] = tv.rest_app_status(app_id)
 			except Exception:
-				pass
+				statuses[app_name] = None
+
+		# Pass 1: visible means on-screen right now
+		for app_name, status in statuses.items():
+			if status and status.get('visible'):
+				return app_name
+
+		# Pass 2: running but not necessarily visible (background/suspended)
+		for app_name, status in statuses.items():
+			if status and status.get('running'):
+				return app_name
+
 		return ""
 
 	def _getVolumeUPnP(self, ip):
@@ -523,7 +560,7 @@ class Plugin(indigo.PluginBase):
 				device.updateStateOnServer("status", "on")
 			else:
 				self.logger.error(f"send \"{device.name}\" on failed")
-				self.logger.info(f"Verify the IP address for \"{device.name}\" ({device.pluginProps.get('ipaddress', 'unknown')}) has not changed")
+				self.logger.info(f"Verify the IP address for \"{device.name}\" ({device.pluginProps.get('ipaddress', 'unknown')}) has not changed and remote permissions have been allowed")
 
 	def turnOnTVAction(self, pluginAction, device, callerWaitingForResult=None):
 		send_success = self.turnOnTV(device)
@@ -533,7 +570,7 @@ class Plugin(indigo.PluginBase):
 			device.updateStateOnServer("status", "on")
 		else:
 			self.logger.error(f"send \"{device.name}\" on failed")
-			self.logger.info(f"Verify the IP address for \"{device.name}\" ({device.pluginProps.get('ipaddress', 'unknown')}) has not changed")
+			self.logger.info(f"Verify the IP address for \"{device.name}\" ({device.pluginProps.get('ipaddress', 'unknown')}) has not changed and remote permissions have been allowed")
 
 	def turnOffTVAction(self, pluginAction, device, callerWaitingForResult=None):
 		send_success = self.turnOffTV(device)
@@ -543,7 +580,7 @@ class Plugin(indigo.PluginBase):
 			device.updateStateOnServer("status", "off")
 		else:
 			self.logger.error(f"send \"{device.name}\" off failed")
-			self.logger.info(f"Verify the IP address for \"{device.name}\" ({device.pluginProps.get('ipaddress', 'unknown')}) has not changed")
+			self.logger.info(f"Verify the IP address for \"{device.name}\" ({device.pluginProps.get('ipaddress', 'unknown')}) has not changed and remote permissions have been allowed")
 
 	def volumeUpAction(self, pluginAction, device, callerWaitingForResult=None):
 		self._volumeUp(device)
@@ -692,6 +729,7 @@ class Plugin(indigo.PluginBase):
 		self.logger.debug(f"Selecting source '{source_id}' ({key}) on \"{device.name}\"")
 		if self._sendKey(device, key, f"source:{source_id}"):
 			device.updateStateOnServer("currentSource", source_id)
+			device.updateStateOnServer("currentApp", "")
 
 	def getSourceList(self, filter="", valuesDict=None, typeId="", targetId=0):
 		"""Dynamic list callback for the selectSource action ConfigUI."""
