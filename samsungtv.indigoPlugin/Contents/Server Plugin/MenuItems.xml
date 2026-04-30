@@ -1,7 +1,19 @@
 <?xml version="1.0"?>
 <MenuItems>
-    <MenuItem id="mwnu1" >
-        <Name>Toggle Debug</Name>
-         <CallbackMethod>toggleDebugging</CallbackMethod>
-    </MenuItem>
+	<MenuItem id="menu1">
+		<Name>Toggle Debug</Name>
+		<CallbackMethod>toggleDebugging</CallbackMethod>
+	</MenuItem>
+	<MenuItem id="menu2">
+		<Name>Toggle Detailed State Logging</Name>
+		<CallbackMethod>toggleDetailedDebugging</CallbackMethod>
+	</MenuItem>
+	<MenuItem id="menu3">
+		<Name>List Configured Device Info</Name>
+		<CallbackMethod>listDeviceInfo</CallbackMethod>
+	</MenuItem>
+	<MenuItem id="menu4">
+		<Name>Discover Samsung TVs on Network</Name>
+		<CallbackMethod>discoverSamsungTVs</CallbackMethod>
+	</MenuItem>
 </MenuItems>

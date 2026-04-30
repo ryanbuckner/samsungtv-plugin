@@ -2,91 +2,120 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](http://mit-license.org)
 [![Platform](https://img.shields.io/badge/Platform-Indigo-blueviolet)](https://www.indigodomo.com/) 
-[![Language](https://img.shields.io/badge/Language-python%203.10-orange)](https://www.python.org/)
+[![Language](https://img.shields.io/badge/Language-python%203.13-orange)](https://www.python.org/)
 [![Requirements](https://img.shields.io/badge/Requirements-Indigo%20v2022.1%2B-green)](https://www.indigodomo.com/downloads.html)
 ![Releases](https://img.shields.io/github/release-date/ryanbuckner/samsungtv-plugin?color=red&label=latest%20release)
 
 
 # Samsung TV Plugin for Indigo Domotics Home Automation
-## samsungtv-indigo-plugin for Python3.10
-This Indigo Plugin provides a way to connect Indigo to your Samsung TVs with the Tizen OS. This plugin is only supported for [Indigo Domotics Software ](http://www.indigodomo.com)
 
-### What is Tizen?
+This Indigo Plugin connects [Indigo Domotics](http://www.indigodomo.com) to Samsung Smart TVs running Tizen OS via the WebSocket / REST API. No SmartThings account or cloud dependency required.
 
-Tizen is the Operating System on Samsung Smart TVs supported by this plugin
+This plugin is not endorsed by or affiliated with Samsung.
 
-##### Power State Monitoring
-Monitor the On/Off state of your TVs
+---
 
-##### Toggle Power
-Turn your TVs on and off
+### Features
 
-##### Navigation Buttons
-Send Up, Down, Left, Right etc. buttons
+**Power**
+- On / Off / Toggle via Wake-on-LAN and the TV WebSocket API
+- Polled power state monitoring with configurable refresh interval
 
-##### Volume Controls
-Send up, down, mute 
+**Volume**
+- Volume Up / Down / Mute
+- Increase or decrease volume by 1 step
+- Set Volume to an absolute level (0–100)
+- Volume level read from the TV via UPnP on each poll
 
-##### Custom States
-Various custom states are supported 
- 
+**Navigation**
+- Full D-pad: Up, Down, Left, Right, Enter, Back, Home, Exit
+- Menu, Source, Guide, Tools, Info
 
+**Media Playback**
+- Play, Pause, Stop, Fast Forward, Rewind
+- Channel Up / Channel Down
 
-### The Samsung TV Plugin
+**Source / Input Selection**
+- Switch inputs (TV, HDMI 1–4, AV, Component) from an action dropdown
 
-The plugin is a first MVP to support new models of Samsung TV in Indigo 
+**App Launching & Tracking**
+- Launch any app from a dropdown (Netflix, YouTube TV, YouTube, Prime Video, Disney+, and more)
+- Polls for the currently running app and updates the `currentApp` device state
 
-More informaton will be listed [on the GitHub Wiki](https://github.com/ryanbuckner/samsungtv-plugin/wiki)
+**Send Key Code**
+- Send any raw Samsung key code directly (e.g. `KEY_RED`, `KEY_ASPECT`, `KEY_0`)
 
-This plugin is not endorsed or associated with Samsung 
+---
 
-##### The plugin currently supports:
+### Installation
 
-1) Support for multiple Samsung TVS (with Tizen OS)
-2) On / Off state monitoring and control 
-3) Volume Up , Down , and Mute
-4) Navigation Up , Down, Left, Right, Back, Enter
-5) Custom device states of the member device
-  - Unique Member ID 
-  - Model Number
-  - TV Name
-  - Connection Type 
+Download `SamsungTV.indigoPlugin` and double-click it to install.
 
-#### Installation
+#### Plugin Config
+- Set the poll interval (default 30 seconds, minimum 10)
 
-Download the SamsungTV.indigoPlugin file and double click it
+#### Device Config
+1. Create a new device, type **Samsung TV**
+2. Enter the IP address of the TV
+3. Port defaults to `8002` — change only if needed
+4. Enter a unique filename for the token (e.g. `living-room-tv.txt`)
 
+> The TV must be powered on the first time you add it so the plugin can obtain a WebSocket token and discover the MAC address for Wake-on-LAN.
 
-##### Plugin Config 
-- configure the Plugin:
-  - There are no Plugin config options other than the toggling of Debug
+> Developer mode is required on the TV. Authorize the IP address of your Indigo server when prompted on-screen.
 
-##### Device Config 
-- create a new device of Type Samsung TV
-  - model should be Samsung TV
-  - Name your device anything you want. It's preferred to use something indicating the name or location of the TV
-  - Press Edit Device Settings... 
-  - Enter the IP address of the TV
-  - Enter the port number if it differst from the standard 8002 default 
-  - Choose a unique name of the .txt file to save token info (eg 'tv-token.txt')
+---
 
-* Note that the TV must be in developer mode with the IP Address of your Indigo server authorized 
-* The TV must be ON to communicate with it. Turn on the TV when adding it to Indigo
+### Actions
 
+| Action | Description |
+|--------|-------------|
+| Turn On | Send Wake-on-LAN magic packet |
+| Turn Off | Send power key via WebSocket |
+| Toggle TV On/Off | WOL on, WebSocket power key off |
+| Refresh Data | Force an immediate state poll |
+| Increase Volume (+1) | Step volume up by one |
+| Decrease Volume (-1) | Step volume down by one |
+| Set Volume | Set an absolute volume level 0–100 |
+| Send Remote Command | Pick a button from a dropdown (volume, nav, media, etc.) |
+| Send Key Code | Type any `KEY_xxx` code directly |
+| Select Source / Input | Switch to TV, HDMI 1–4, AV, or Component |
+| Launch App | Launch an app from a dropdown |
 
-### Future Features:
+---
 
-Future features for this plugin will be community driven. Some ideas: 
-1) Launch app action 
-2) Frame TV control 
-3) Input control 
+### Plugins Menu
 
-### Troubleshooting:
+| Menu Item | Description |
+|-----------|-------------|
+| Toggle Debug | Enable / disable debug logging |
+| Toggle Detailed State Logging | Log every device state value on each poll cycle |
+| List Configured Device Info | Dump name, IP, MAC, and OS for all configured TVs to the log |
+| Discover Samsung TVs on Network | ⚠️ Experimental — scan the network for Samsung TVs via SSDP |
 
-- The plugin is unable to communicate with TVs when they are off. It will attempt to connect to the TV and if it cannot after 3 seconds, it makes the assumption that it's Off
-- When configuring new devices, turn the device on
-- Some TVs may go into standby mode before switching from On to Off. This may result in a few second delay of the Indigo state to become Off
+---
 
+### TV Discovery (Experimental)
 
+> ⚠️ **Experimental feature.** Discovery works on most networks but results are not guaranteed. Use it as a helper to find IP addresses — always verify before adding a device.
 
+**Plugins → Samsung TV → Discover Samsung TVs on Network** sends an SSDP multicast across the local network to find Samsung TVs and logs their IP address, name, model, OS, and MAC. It also flags which TVs are already configured in Indigo.
 
+**Requirements for discovery to work:**
+- **The TV must be powered fully on.** Standby mode disables SSDP broadcasts on most Samsung models.
+- The TV and the Indigo server must be on the **same network segment**. Discovery does not cross router boundaries or VLANs.
+- Allow approximately 4 seconds for the scan to complete.
+
+Discovery does not add devices automatically — use the found IP address to manually create a new Samsung TV device in Indigo.
+
+---
+
+### Troubleshooting
+
+- The plugin polls over the local network. The TV must be reachable from the Indigo server.
+- When a TV is unreachable it shows a red error badge in the Indigo device list and clears it when connectivity is restored.
+- Wake-on-LAN requires the MAC address to be stored. Turn the TV on at least once after adding it so the plugin can auto-discover and persist the MAC address.
+- Enable debug logging via **Plugins → Samsung TV → Toggle Debug** to see connection details in the Indigo log.
+- Enable detailed state logging via **Plugins → Samsung TV → Toggle Detailed State Logging** to see every device state value on each poll.
+
+More information on the [GitHub Wiki](https://github.com/ryanbuckner/samsungtv-plugin/wiki).

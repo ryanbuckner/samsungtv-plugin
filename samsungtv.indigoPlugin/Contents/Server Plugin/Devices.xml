@@ -1,20 +1,19 @@
 <?xml version="1.0"?>
 <Devices>
-	<!-- Define some devices -->
 	<Device type="relay" id="televisions">
 
 	<Name>Samsung TV</Name>
 	<ConfigUI>
 		<SupportURL>https://forums.indigodomo.com/viewforum.php?f=363</SupportURL>
 		<Field id="ipaddress" type="textfield">
-                <Label>IP Address</Label>
-        </Field>
-        <Field id="port" type="textfield" defaultValue="8002">
-                <Label>Port</Label>
-        </Field>
-        <Field id="token" type="textfield" defaultValue="tv-token.txt">
-                <Label>Token File Name</Label>
-        </Field>
+			<Label>IP Address</Label>
+		</Field>
+		<Field id="port" type="textfield" defaultValue="8002">
+			<Label>Port</Label>
+		</Field>
+		<Field id="token" type="textfield" defaultValue="tv-token.txt">
+			<Label>Token File Name</Label>
+		</Field>
 	</ConfigUI>
 	<States>
 		<State id="name">
@@ -34,8 +33,8 @@
 		</State>
 		<State id="status">
 			<ValueType>String</ValueType>
-			<TriggerLabel>Name</TriggerLabel>
-			<ControlPageLabel>Name</ControlPageLabel>
+			<TriggerLabel>Power Status</TriggerLabel>
+			<ControlPageLabel>Status</ControlPageLabel>
 		</State>
 		<State id="device_id">
 			<ValueType>String</ValueType>
@@ -72,7 +71,26 @@
 			<TriggerLabel>Type</TriggerLabel>
 			<ControlPageLabel>Type</ControlPageLabel>
 		</State>
-		
+		<State id="volumeLevel">
+			<ValueType>Integer</ValueType>
+			<TriggerLabel>Volume Level</TriggerLabel>
+			<ControlPageLabel>Volume</ControlPageLabel>
+		</State>
+		<State id="isMuted">
+			<ValueType>Boolean</ValueType>
+			<TriggerLabel>Is Muted</TriggerLabel>
+			<ControlPageLabel>Muted</ControlPageLabel>
+		</State>
+		<State id="currentSource">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Current Source</TriggerLabel>
+			<ControlPageLabel>Source</ControlPageLabel>
+		</State>
+		<State id="currentApp">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Current App</TriggerLabel>
+			<ControlPageLabel>App</ControlPageLabel>
+		</State>
 	</States>
 	<UiDisplayStateId>status</UiDisplayStateId>
 	</Device>

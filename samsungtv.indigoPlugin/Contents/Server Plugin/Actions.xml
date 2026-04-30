@@ -2,39 +2,113 @@
 
 <Actions>
 	<SupportURL>https://forums.indigodomo.com/</SupportURL>
+
 	<Action id="refresh_tv_data" deviceFilter="self.televisions">
 		<Name>Refresh Data</Name>
 		<CallbackMethod>refresh_tv_data</CallbackMethod>
 	</Action>
+
+	<Action id="turnOnTV" deviceFilter="self.televisions">
+		<Name>Turn On</Name>
+		<CallbackMethod>turnOnTVAction</CallbackMethod>
+	</Action>
+
+	<Action id="turnOffTV" deviceFilter="self.televisions">
+		<Name>Turn Off</Name>
+		<CallbackMethod>turnOffTVAction</CallbackMethod>
+	</Action>
+
 	<Action id="toggleTVPower" deviceFilter="self.televisions">
 		<Name>Toggle TV On/Off</Name>
 		<CallbackMethod>toggleTVPower</CallbackMethod>
 	</Action>
-   <Action id="sendCommand" deviceFilter="self.televisions">
-        <Name>Send Command</Name>
-        <CallbackMethod>sendCommand</CallbackMethod>
-        <ConfigUI>
-        	<Field id="commandCode" type="menu">
-        		<Label>Command:</Label>
-        		<List>
-        			<Option value="mute">Mute</Option>
-        			<Option value="volume_up">Volume Up</Option>
-        			<Option value="volume_down">Volume Down</Option>
-        			<Option value="up">Send Up Key</Option>
-        			<Option value="down">Send Down Key</Option>
-        			<Option value="left">Send Left Key</Option>
-        			<Option value="right">Send Right Key</Option>
-        			<Option value="enter">Send Enter Key</Option>
-        			<Option value="back">Send Back Key</Option>
-        			<Option value="home">Send Home Key</Option>
-        			<Option value="menu">Send Menu Key</Option>
-        			<Option value="source">Send Source Key</Option>
-        			<Option value="guide">Send Guide Key</Option>
-        			<Option value="tools">Send Tools Key</Option>
-        			<Option value="info">Send Info Key</Option>
-        		</List>
-        	</Field>
-       </ConfigUI>
-    </Action>
-</Actions>
 
+	<Action id="sendCommand" deviceFilter="self.televisions">
+		<Name>Send Remote Command</Name>
+		<CallbackMethod>sendCommand</CallbackMethod>
+		<ConfigUI>
+			<Field id="commandCode" type="menu">
+				<Label>Command:</Label>
+				<List>
+					<Option value="mute">Mute</Option>
+					<Option value="volume_up">Volume Up</Option>
+					<Option value="volume_down">Volume Down</Option>
+					<Option value="play">Play</Option>
+					<Option value="pause">Pause</Option>
+					<Option value="stop">Stop</Option>
+					<Option value="fast_forward">Fast Forward</Option>
+					<Option value="rewind">Rewind</Option>
+					<Option value="channel_up">Channel Up</Option>
+					<Option value="channel_down">Channel Down</Option>
+					<Option value="up">Up</Option>
+					<Option value="down">Down</Option>
+					<Option value="left">Left</Option>
+					<Option value="right">Right</Option>
+					<Option value="enter">Enter</Option>
+					<Option value="back">Back</Option>
+					<Option value="home">Home</Option>
+					<Option value="exit">Exit</Option>
+					<Option value="menu">Menu</Option>
+					<Option value="source">Source</Option>
+					<Option value="guide">Guide</Option>
+					<Option value="tools">Tools</Option>
+					<Option value="info">Info</Option>
+				</List>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="sendKeyCode" deviceFilter="self.televisions">
+		<Name>Send Key Code</Name>
+		<CallbackMethod>sendKeyCode</CallbackMethod>
+		<ConfigUI>
+			<Field id="keyCode" type="textfield">
+				<Label>Key Code:</Label>
+				<Description>e.g. KEY_HOME, KEY_PLAY, KEY_0, KEY_RED</Description>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="volumeUp" deviceFilter="self.televisions">
+		<Name>Increase Volume (+1)</Name>
+		<CallbackMethod>volumeUpAction</CallbackMethod>
+	</Action>
+
+	<Action id="volumeDown" deviceFilter="self.televisions">
+		<Name>Decrease Volume (-1)</Name>
+		<CallbackMethod>volumeDownAction</CallbackMethod>
+	</Action>
+
+	<Action id="setVolume" deviceFilter="self.televisions">
+		<Name>Set Volume</Name>
+		<CallbackMethod>setVolume</CallbackMethod>
+		<ConfigUI>
+			<Field id="volumeLevel" type="textfield" defaultValue="50">
+				<Label>Volume Level (0–100):</Label>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="selectSource" deviceFilter="self.televisions">
+		<Name>Select Source / Input</Name>
+		<CallbackMethod>selectSource</CallbackMethod>
+		<ConfigUI>
+			<Field id="sourceId" type="menu">
+				<Label>Source:</Label>
+				<List class="self" method="getSourceList" dynamicReload="true"/>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="launchApp" deviceFilter="self.televisions">
+		<Name>Launch App</Name>
+		<CallbackMethod>launchApp</CallbackMethod>
+		<ConfigUI>
+			<Field id="appName" type="menu">
+				<Label>App:</Label>
+				<List class="self" method="getAppList" dynamicReload="true"/>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+</Actions>
