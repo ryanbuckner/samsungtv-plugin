@@ -9,7 +9,7 @@
 
 # Samsung TV Plugin for Indigo Domotics Home Automation
 
-This Indigo Plugin connects [Indigo Domotics](http://www.indigodomo.com) to Samsung Smart TVs running Tizen OS via the WebSocket / REST API. No SmartThings account or cloud dependency required.
+This Indigo Plugin connects [Indigo Domotics](http://www.indigodomo.com) to Samsung Smart TVs running Tizen OS (2015 models and later) via the WebSocket / REST API. No SmartThings account or cloud dependency required.
 
 This plugin is not endorsed by or affiliated with Samsung.
 
@@ -35,12 +35,14 @@ This plugin is not endorsed by or affiliated with Samsung.
 - Play, Pause, Stop, Fast Forward, Rewind
 - Channel Up / Channel Down
 
-**Source / Input Selection**
+**Source / Input Tracking**
 - Switch inputs (TV, HDMI 1–4, AV, Component) from an action dropdown
+- `currentSource` shows the active input; automatically set to **Smart Hub** when an app is running
 
 **App Launching & Tracking**
 - Launch any app from a dropdown (Netflix, YouTube TV, YouTube, Prime Video, Disney+, and more)
-- Polls for the currently running app and updates the `currentApp` device state
+- Polls for the currently active foreground app and updates the `currentApp` device state
+- Foreground detection takes priority over background/cached apps — e.g. Netflix correctly wins over YouTube running in the background
 
 **Send Key Code**
 - Send any raw Samsung key code directly (e.g. `KEY_RED`, `KEY_ASPECT`, `KEY_0`)
@@ -53,6 +55,10 @@ Download `SamsungTV.indigoPlugin` and double-click it to install.
 
 #### Plugin Config
 - Set the poll interval (default 30 seconds, minimum 10)
+- Set the **Debug Logging** level:
+  - **Critical** — only errors are logged (default)
+  - **Debug** — connection and command details
+  - **Detailed State Logging** — dumps every device state value on each poll cycle
 
 #### Device Config
 1. Create a new device, type **Samsung TV**
@@ -88,8 +94,8 @@ Download `SamsungTV.indigoPlugin` and double-click it to install.
 
 | Menu Item | Description |
 |-----------|-------------|
-| Toggle Debug | Enable / disable debug logging |
-| Toggle Detailed State Logging | Log every device state value on each poll cycle |
+| Toggle Debug | Toggle debug logging on/off |
+| Toggle Detailed State Logging | Toggle detailed state logging; immediately polls all TVs so output appears right away |
 | List Configured Device Info | Dump name, IP, MAC, and OS for all configured TVs to the log |
 | Discover Samsung TVs on Network | ⚠️ Experimental — scan the network for Samsung TVs via SSDP |
 
@@ -104,7 +110,7 @@ Download `SamsungTV.indigoPlugin` and double-click it to install.
 **Requirements for discovery to work:**
 - **The TV must be powered fully on.** Standby mode disables SSDP broadcasts on most Samsung models.
 - The TV and the Indigo server must be on the **same network segment**. Discovery does not cross router boundaries or VLANs.
-- Allow approximately 4 seconds for the scan to complete.
+- Allow approximately 6 seconds for the scan to complete.
 
 Discovery does not add devices automatically — use the found IP address to manually create a new Samsung TV device in Indigo.
 
@@ -127,7 +133,7 @@ tv     = indigo.devices["Living Room TV"]   # use your device name
 print(tv.onState)                    # True / False
 print(tv.states["volumeLevel"])      # 0–100
 print(tv.states["currentApp"])       # e.g. "Netflix"
-print(tv.states["currentSource"])    # e.g. "HDMI 1"
+print(tv.states["currentSource"])    # e.g. "HDMI 1" or "Smart Hub"
 print(tv.states["macaddress"])
 print(tv.states["model"])
 ```
@@ -213,8 +219,8 @@ plugin.executeAction("setVolume",    deviceId=tv.id, props={"volumeLevel": "20"}
 
 - The plugin polls over the local network. The TV must be reachable from the Indigo server.
 - When a TV is unreachable it shows a red error badge in the Indigo device list and clears it when connectivity is restored.
+- If a power-on command fails, verify the IP address has not changed and that remote permissions have been allowed on the TV.
 - Wake-on-LAN requires the MAC address to be stored. Turn the TV on at least once after adding it so the plugin can auto-discover and persist the MAC address.
-- Enable debug logging via **Plugins → Samsung TV → Toggle Debug** to see connection details in the Indigo log.
-- Enable detailed state logging via **Plugins → Samsung TV → Toggle Detailed State Logging** to see every device state value on each poll.
+- Adjust the **Debug Logging** level in **Plugins → Samsung TV → Plugin Configuration** to see more detail in the Indigo log. **Detailed State Logging** dumps every device state on each poll and triggers an immediate refresh when enabled.
 
 More information on the [GitHub Wiki](https://github.com/ryanbuckner/samsungtv-plugin/wiki).
