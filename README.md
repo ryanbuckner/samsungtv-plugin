@@ -1,4 +1,4 @@
-<img src="https://cdn.shopify.com/s/files/1/0800/4435/9966/files/1085328994.jpg?v=1782590913&width=1500" hight="25%" width="25%" >
+<img src="https://www.zdnet.com/wp-content/uploads/sites/3/samsung-logo_ce674d.jpg" hight="25%" width="25%" >
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](http://mit-license.org)
 [![Platform](https://img.shields.io/badge/Platform-Indigo-blueviolet)](https://www.indigodomo.com/) 
