@@ -448,6 +448,37 @@ class Plugin(indigo.PluginBase):
 		except (TypeError, ValueError):
 			return 8002
 
+	def _describeException(self, e):
+		"""Returns (detail_string, root_cause_exception) for an exception that
+		may have been re-wrapped by samsungtvws. The library catches
+		requests.ConnectionError internally and re-raises its own generic
+		HttpApiError ("TV unreachable or feature not supported on this
+		model."), discarding the real error's type and text. The original is
+		still chained via `raise ... from err`, so __cause__ (and note
+		requests.SSLError IS a ConnectionError subclass, so an SSL failure
+		gets swallowed into that same generic message) is where the real
+		detail lives — walk it to find the innermost cause."""
+		root = e
+		seen = set()
+		while getattr(root, '__cause__', None) is not None and id(root) not in seen:
+			seen.add(id(root))
+			root = root.__cause__
+		detail = f"{type(e).__name__}: {e}"
+		if root is not e:
+			detail += f" (caused by {type(root).__name__}: {root})"
+		return detail, root
+
+	def _checkTcpPort(self, ip, port, timeout=3.0):
+		"""Bare TCP connect check — bypasses HTTP/TLS/samsungtvws entirely, to
+		isolate whether the host is even accepting connections on this port
+		at all from whatever happens at the Tizen API layer above it."""
+		start = time.monotonic()
+		try:
+			with socket.create_connection((ip, port), timeout=timeout):
+				return True, f"connected in {time.monotonic() - start:.2f}s"
+		except Exception as e:
+			return False, f"{type(e).__name__}: {e}"
+
 	def _getTokenPath(self, device):
 		"""Returns the full path to a device's token file, re-sanitizing the
 		stored token name every time (not just at ConfigUI validation time).
@@ -524,21 +555,7 @@ class Plugin(indigo.PluginBase):
 		except Exception as e:
 			entry = self.deviceList.setdefault(device.id, {})
 			retry_count = entry.get('retryCount', 0)
-			# samsungtvws catches requests.ConnectionError internally and
-			# re-raises its own generic HttpApiError ("TV unreachable or
-			# feature not supported on this model.") — discarding the real
-			# error's type and text. The original is still chained via
-			# `raise ... from err`, so __cause__ (and requests.SSLError IS a
-			# ConnectionError subclass, so an SSL failure gets swallowed into
-			# that same generic message) is where the real detail lives.
-			root = e
-			seen = set()
-			while getattr(root, '__cause__', None) is not None and id(root) not in seen:
-				seen.add(id(root))
-				root = root.__cause__
-			detail = f"{type(e).__name__}: {e}"
-			if root is not e:
-				detail += f" (caused by {type(root).__name__}: {root})"
+			detail, root = self._describeException(e)
 			is_tls_error = "SSL" in type(root).__name__ or "ssl" in str(root).lower()
 			if retry_count == 0:
 				# First failure since the last successful poll (or ever, on a
@@ -746,6 +763,82 @@ class Plugin(indigo.PluginBase):
 
 	def refresh_tv_data(self, pluginAction, device):
 		self.updatedevicestates(device)
+
+	# ---------------------------------------------------------------------------
+	# runDiagnostics action — step-by-step connectivity check, written to the
+	# event log. Accessible from the device's right-click menu in Indigo (same
+	# place as Refresh Data) via Actions.xml's deviceFilter.
+	# ---------------------------------------------------------------------------
+	def runDiagnostics(self, pluginAction, device):
+		name = device.name
+		ip = device.pluginProps.get('ipaddress', '').strip()
+		configured_port = self._getPort(device)
+
+		self.logger.info("")
+		self.logger.info("{0:=^100}".format(f" Diagnostics: \"{name}\" "))
+
+		# 1. IP address format
+		try:
+			ipaddress_module.ip_address(ip)
+			self.logger.info(f"[1] IP address format........... OK ({ip})")
+		except ValueError:
+			self.logger.info(f"[1] IP address format........... FAILED — \"{ip}\" is not a valid IP address")
+			self.logger.info("{0:=^100}".format(""))
+			self.logger.error(f"\"{name}\": fix the IP address in this device's config before diagnostics can continue")
+			return
+
+		# 2. TCP reachability on the configured port — bypasses HTTP/TLS/the
+		# Tizen API entirely, isolating "is anything there at all" from
+		# "does the TV's API respond correctly".
+		port_ok, port_detail = self._checkTcpPort(ip, configured_port, timeout=3.0)
+		self.logger.info(f"[2] TCP port {configured_port} reachable......... {'OK' if port_ok else 'FAILED'} ({port_detail})")
+
+		# 3. The other common port, as a hint if the Port setting is simply wrong
+		other_port = 8001 if configured_port == 8002 else 8002
+		other_ok, other_detail = self._checkTcpPort(ip, other_port, timeout=3.0)
+		self.logger.info(f"[3] TCP port {other_port} reachable (alt)..... {'OK' if other_ok else 'FAILED'} ({other_detail})")
+
+		# 4. UPnP RenderingControl port — a separate service/port from the
+		# main REST/WebSocket port, so this can be broken independently.
+		upnp_ok, upnp_detail = self._checkTcpPort(ip, UPNP_PORT, timeout=3.0)
+		self.logger.info(f"[4] UPnP port {UPNP_PORT} reachable......... {'OK' if upnp_ok else 'FAILED'} ({upnp_detail})")
+
+		# 5. Token file
+		token_path = self._getTokenPath(device)
+		token_ok = os.path.exists(token_path) and os.access(token_path, os.R_OK | os.W_OK)
+		self.logger.info(f"[5] Token file accessible....... {'OK' if token_ok else 'FAILED'} ({token_path})")
+
+		# 6. MAC address stored (required for Wake-on-LAN)
+		mac = device.pluginProps.get('macaddress', '') or device.states.get('macaddress', '')
+		self.logger.info(f"[6] MAC address stored.......... {'OK (' + mac + ')' if mac else 'MISSING — Wake-on-LAN will not work until a successful poll discovers it'}")
+
+		# 7. The actual Tizen REST API call that polling depends on — only
+		# worth trying if the port is even open.
+		rest_ok = False
+		rest_detail = "skipped — port unreachable"
+		if port_ok:
+			try:
+				rest = samsungtvws.rest.SamsungTVRest(host=ip, port=configured_port, timeout=3.0)
+				info = rest.rest_device_info()
+				rest_ok = True
+				rest_detail = f"PowerState={info.get('device', {}).get('PowerState', 'unknown')}"
+			except Exception as e:
+				rest_detail, _ = self._describeException(e)
+		self.logger.info(f"[7] Tizen REST API (/api/v2/)... {'OK' if rest_ok else 'FAILED'} ({rest_detail})")
+
+		self.logger.info("{0:=^100}".format(""))
+
+		# Plain-language summary of the most likely cause, based on which
+		# checks passed — so the log doesn't just dump data, it points
+		# somewhere useful.
+		if rest_ok:
+			self.logger.info(f"\"{name}\": diagnostics passed — this TV is fully reachable right now.")
+		elif port_ok:
+			self.logger.error(f"\"{name}\": the TV accepts a connection on port {configured_port}, but the Tizen API call itself failed (see [7] above) — likely a TLS/library issue, not a wrong IP or offline TV.")
+		elif other_ok:
+			self.logger.error(f"\"{name}\": port {configured_port} is closed but port {other_port} answered — try changing the Port setting on this device to {other_port}.")
+		else:
+			self.logger.error(f"\"{name}\": not reachable on any checked port right now. This points to a network/device issue, not the plugin — check that the TV is powered on, connected to Wi-Fi/Ethernet, and that its IP ({ip}) matches what the TV itself reports in its network settings (it may have changed via DHCP).")
 
 	# ---------------------------------------------------------------------------
 	# Relay / switch built-in action handler

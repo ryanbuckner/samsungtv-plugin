@@ -8,6 +8,11 @@
 		<CallbackMethod>refresh_tv_data</CallbackMethod>
 	</Action>
 
+	<Action id="runDiagnostics" deviceFilter="self.televisions">
+		<Name>Run Diagnostics</Name>
+		<CallbackMethod>runDiagnostics</CallbackMethod>
+	</Action>
+
 	<Action id="turnOnTV" deviceFilter="self.televisions">
 		<Name>Turn On</Name>
 		<CallbackMethod>turnOnTVAction</CallbackMethod>
