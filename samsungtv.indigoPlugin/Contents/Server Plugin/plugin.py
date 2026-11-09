@@ -21,6 +21,7 @@ import xml.etree.ElementTree as ET
 import socket
 import ipaddress as ipaddress_module
 import threading
+import time
 
 # Maps display names shown in the selectSource action to Samsung key codes.
 SOURCE_MAP = {
@@ -158,7 +159,15 @@ class Plugin(indigo.PluginBase):
 			# Poll in the background instead of inline: Indigo calls deviceStartComm()
 			# serially for every device at launch, so a slow/offline TV here would
 			# block every other device (and the plugin) from starting promptly.
-			self._backgroundPoll(device)
+			# Stagger each device's first connection instead of firing them all
+			# at once: several brand-new connections to different LAN hosts in
+			# the same instant, repeated on every reload, can look like
+			# port-scanning to a router/mesh AP's security heuristics and
+			# trigger a temporary block on the source — spacing them out avoids
+			# that pattern entirely.
+			self._startupPollCount = getattr(self, '_startupPollCount', 0) + 1
+			delay = min((self._startupPollCount - 1) * 1.5, 10.0)
+			self._backgroundPoll(device, delay=delay)
 
 	def _ensureTokenFile(self, device):
 		"""Create the device's token file if it doesn't exist yet. Done here
@@ -176,11 +185,13 @@ class Plugin(indigo.PluginBase):
 				# device will never work until this is fixed.
 				self.logger.error(f"Could not create token file for \"{device.name}\" at {token_path}: {e}")
 
-	def _backgroundPoll(self, device):
-		threading.Thread(target=self._safePoll, args=(device,), daemon=True).start()
+	def _backgroundPoll(self, device, delay=0):
+		threading.Thread(target=self._safePoll, args=(device, delay), daemon=True).start()
 
-	def _safePoll(self, device):
+	def _safePoll(self, device, delay=0):
 		try:
+			if delay:
+				time.sleep(delay)
 			self.updatedevicestates(device)
 		except Exception:
 			self.logger.exception(f"Error during background poll of {device.name}")
