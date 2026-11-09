@@ -513,22 +513,33 @@ class Plugin(indigo.PluginBase):
 		except Exception as e:
 			entry = self.deviceList.setdefault(device.id, {})
 			retry_count = entry.get('retryCount', 0)
-			# SSL/TLS handshake failures (common after a Python dependency
-			# refresh pulls in a newer requests/urllib3 that hardens default TLS
-			# behavior against older embedded HTTPS servers) are NOT a wrong-IP
-			# problem — say so distinctly instead of pointing at the network.
-			is_tls_error = "SSL" in type(e).__name__ or "ssl" in str(e).lower()
+			# samsungtvws catches requests.ConnectionError internally and
+			# re-raises its own generic HttpApiError ("TV unreachable or
+			# feature not supported on this model.") — discarding the real
+			# error's type and text. The original is still chained via
+			# `raise ... from err`, so __cause__ (and requests.SSLError IS a
+			# ConnectionError subclass, so an SSL failure gets swallowed into
+			# that same generic message) is where the real detail lives.
+			root = e
+			seen = set()
+			while getattr(root, '__cause__', None) is not None and id(root) not in seen:
+				seen.add(id(root))
+				root = root.__cause__
+			detail = f"{type(e).__name__}: {e}"
+			if root is not e:
+				detail += f" (caused by {type(root).__name__}: {root})"
+			is_tls_error = "SSL" in type(root).__name__ or "ssl" in str(root).lower()
 			if retry_count == 0:
 				# First failure since the last successful poll (or ever, on a
 				# fresh device) — log it loudly. This is the only signal a user
 				# gets that the configured IP address is wrong, so it must not
 				# be debug-only.
 				if is_tls_error:
-					self.logger.error(f"\"{device.name}\": TLS/SSL handshake with {ipaddress} failed ({e}) — this usually means a Python library update changed TLS behavior, not that the IP address or TV is wrong")
+					self.logger.error(f"\"{device.name}\": TLS/SSL handshake with {ipaddress} failed ({detail}) — this usually means a Python library update changed TLS behavior, not that the IP address or TV is wrong")
 				else:
-					self.logger.error(f"\"{device.name}\": cannot reach {ipaddress} — check that the IP address is correct, the TV is powered on, and it's reachable on the network ({e})")
+					self.logger.error(f"\"{device.name}\": cannot reach {ipaddress} — check that the IP address is correct, the TV is powered on, and it's reachable on the network ({detail})")
 			else:
-				self.logger.debug(f"\"{device.name}\": still unreachable at {ipaddress} (attempt {retry_count + 1}): {e}")
+				self.logger.debug(f"\"{device.name}\": still unreachable at {ipaddress} (attempt {retry_count + 1}): {detail}")
 			device.setErrorStateOnServer("Unreachable")
 			device.updateStatesOnServer([
 				{'key': 'status',     'value': 'off'},
