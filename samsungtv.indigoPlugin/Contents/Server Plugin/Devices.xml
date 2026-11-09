@@ -6,19 +6,89 @@
 	<ConfigUI>
 		<SupportURL>https://forums.indigodomo.com/viewforum.php?f=363</SupportURL>
 		<Field id="ipaddress" type="textfield">
-			<Label>IP Address</Label>
+			<Label>IP Address:</Label>
 		</Field>
-		<Field id="port" type="textfield" defaultValue="8002">
-			<Label>Port</Label>
+		<Field id="method" type="menu" defaultValue="auto">
+			<Label>Protocol:</Label>
+			<List>
+				<Option value="auto">Automatic (recommended)</Option>
+				<Option value="websocket">Websocket — 2016 and newer Tizen TVs</Option>
+				<Option value="encrypted">Encrypted — 2014-2015 H and J series (PIN pairing)</Option>
+				<Option value="legacy">Legacy — 2013 and older (C/D/E/F series)</Option>
+			</List>
 		</Field>
-		<Field id="token" type="textfield" defaultValue="">
-			<Label>Token File Name</Label>
-			<Description>Leave blank to auto-generate a name from the IP address.</Description>
+		<Field id="detectButton" type="button">
+			<Label/>
+			<Title>Detect TV</Title>
+			<CallbackMethod>detectTVButton</CallbackMethod>
 		</Field>
+		<Field id="detectedInfo" type="textfield" readonly="yes" defaultValue="Turn the TV on, then click Detect TV.">
+			<Label>Detected:</Label>
+		</Field>
+
+		<Field id="sepPair" type="separator"/>
+		<Field id="pairLabel" type="label" fontSize="small" fontColor="darkgray">
+			<Label>Pairing lets Indigo send remote keys. 2016+ TVs: click Pair / Authorize, then press Allow on the TV. 2014-2015 H/J TVs: click Pair / Authorize, type the PIN shown on the TV, then click Submit PIN.</Label>
+		</Field>
+		<Field id="pairButton" type="button">
+			<Label/>
+			<Title>Pair / Authorize</Title>
+			<CallbackMethod>pairTVButton</CallbackMethod>
+		</Field>
+		<Field id="pin" type="textfield" defaultValue="">
+			<Label>PIN (2014-2015 TVs):</Label>
+		</Field>
+		<Field id="submitPinButton" type="button">
+			<Label/>
+			<Title>Submit PIN</Title>
+			<CallbackMethod>submitPinButton</CallbackMethod>
+		</Field>
+		<Field id="pairingStatus" type="textfield" readonly="yes" defaultValue="">
+			<Label>Pairing status:</Label>
+		</Field>
+
+		<Field id="sepOptions" type="separator"/>
 		<Field id="detectApp" type="checkbox" defaultValue="true">
 			<Label>Detect Running App:</Label>
-			<Description>Disable for faster polling if you don't need this.</Description>
+			<Description>2016+ TVs only. Disable for faster polling if you don't need this.</Description>
 		</Field>
+		<Field id="turnOnActionGroup" type="menu" defaultValue="wol">
+			<Label>Turn On using:</Label>
+			<List class="self" method="getActionGroupList" dynamicReload="true"/>
+		</Field>
+		<Field id="turnOnLabel" type="label" fontSize="small" fontColor="darkgray">
+			<Label>Default is Wake-on-LAN. Pick an action group (IR blaster, HDMI-CEC, etc.) for TVs that don't wake over the network — common for 2015-and-older TVs on Wi-Fi.</Label>
+		</Field>
+
+		<Field id="showAdvanced" type="checkbox" defaultValue="false">
+			<Label>Show advanced settings:</Label>
+		</Field>
+		<Field id="port" type="textfield" defaultValue="8002" visibleBindingId="showAdvanced" visibleBindingValue="true">
+			<Label>Websocket Port:</Label>
+			<Description>8002 (secure, 2018+) or 8001. Automatic mode tries both.</Description>
+		</Field>
+		<Field id="token" type="textfield" defaultValue="" visibleBindingId="showAdvanced" visibleBindingValue="true">
+			<Label>Token File Name:</Label>
+			<Description>Leave blank to auto-generate a name from the IP address.</Description>
+		</Field>
+		<Field id="wolBroadcast" type="textfield" defaultValue="" visibleBindingId="showAdvanced" visibleBindingValue="true">
+			<Label>Wake-on-LAN Broadcast:</Label>
+			<Description>Leave blank to send to 255.255.255.255 and the TV's /24 subnet.</Description>
+		</Field>
+		<Field id="macaddress" type="textfield" defaultValue="" visibleBindingId="showAdvanced" visibleBindingValue="true">
+			<Label>MAC Address:</Label>
+			<Description>Learned automatically the first time the TV is seen on.</Description>
+		</Field>
+
+		<!-- Filled in by detection / pairing; not edited directly. -->
+		<Field id="resolvedMethod" type="textfield" hidden="true" defaultValue=""><Label/></Field>
+		<Field id="restPort" type="textfield" hidden="true" defaultValue=""><Label/></Field>
+		<Field id="model" type="textfield" hidden="true" defaultValue=""><Label/></Field>
+		<Field id="frameTV" type="textfield" hidden="true" defaultValue=""><Label/></Field>
+		<Field id="detectedFor" type="textfield" hidden="true" defaultValue=""><Label/></Field>
+		<Field id="encToken" type="textfield" hidden="true" defaultValue=""><Label/></Field>
+		<Field id="encSessionId" type="textfield" hidden="true" defaultValue=""><Label/></Field>
+		<Field id="installedApps" type="textfield" hidden="true" defaultValue=""><Label/></Field>
 	</ConfigUI>
 	<States>
 		<State id="name">
@@ -38,8 +108,13 @@
 		</State>
 		<State id="status">
 			<ValueType>String</ValueType>
-			<TriggerLabel>Power Status</TriggerLabel>
+			<TriggerLabel>Power Status (on / standby / off)</TriggerLabel>
 			<ControlPageLabel>Status</ControlPageLabel>
+		</State>
+		<State id="connectionMethod">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Protocol</TriggerLabel>
+			<ControlPageLabel>Protocol</ControlPageLabel>
 		</State>
 		<State id="device_id">
 			<ValueType>String</ValueType>

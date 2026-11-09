@@ -13,9 +13,10 @@ except ImportError:
 
 import sys
 import datetime
-import samsungtvws
-import wakeonlan
+import json
 import os
+import re
+import subprocess
 import urllib.request
 import xml.etree.ElementTree as ET
 import socket
@@ -23,9 +24,22 @@ import ipaddress as ipaddress_module
 import threading
 import time
 
+import requests
+import samsungtvws
+import wakeonlan
+from samsungtvws.exceptions import HttpApiError, UnauthorizedError
+
+from transports import (
+	AsyncRunner, WebsocketTransport, EncryptedTransport, EncryptedPairing, LegacyTransport,
+	NeedsPairingError, NotSupportedError, model_requires_encryption,
+	METHOD_AUTO, METHOD_WEBSOCKET, METHOD_ENCRYPTED, METHOD_LEGACY,
+	WEBSOCKET_SSL_PORT, WEBSOCKET_NO_SSL_PORT, ENCRYPTED_PORT, ENCRYPTED_PAIRING_PORT, LEGACY_PORT,
+)
+
 # Maps display names shown in the selectSource action to Samsung key codes.
 SOURCE_MAP = {
 	"TV":          "KEY_TV",
+	"HDMI":        "KEY_HDMI",      # cycles through HDMI inputs (what HA exposes)
 	"HDMI 1":      "KEY_HDMI1",
 	"HDMI 2":      "KEY_HDMI2",
 	"HDMI 3":      "KEY_HDMI3",
@@ -57,8 +71,37 @@ COMMON_APPS = {
 	"Samsung Internet":  "org.tizen.browser",
 }
 
-# UPnP RenderingControl port used by Samsung Tizen TVs.
+CUSTOM_APP = "__custom__"
+
+# "Turn On using" menu value meaning "no action group — use Wake-on-LAN".
+TURN_ON_WOL = "wol"
+
+# Upper bound for network work done inside a config-dialog button callback.
+# The Indigo client stops waiting for a callback after a few seconds; past
+# that, it logs a timeout and mis-matches the late reply to its next request.
+DIALOG_TIMEOUT = 6
+
+# How long a background "press Allow on the TV" wait stays open.
+AUTHORIZE_WAIT = 30
+
+# UPnP RenderingControl port used by Samsung TVs (2014+).
 UPNP_PORT = 9197
+
+# After a power-off is sent, TVs keep answering the network for several
+# seconds while they shut down. Treat the TV as off for this long (and drop
+# key presses) so a poll doesn't flip it straight back to "on" — same idea as
+# HA's power_off_in_progress window.
+POWER_OFF_GRACE = 25
+
+METHOD_LABELS = {
+	METHOD_WEBSOCKET: "Websocket (2016+ Tizen)",
+	METHOD_ENCRYPTED: "Encrypted (2014-2015 H/J series)",
+	METHOD_LEGACY:    "Legacy (2013 and earlier)",
+}
+
+
+class UnexpectedResponse(Exception):
+	"""The TV answered, but not with something we understand."""
 
 
 class Plugin(indigo.PluginBase):
@@ -71,8 +114,15 @@ class Plugin(indigo.PluginBase):
 		level = pluginPrefs.get("debugLevel", "off")
 		self.debug         = level in ("debug", "detailed")
 		self.detailedDebug = level == "detailed"
-		# dict keyed by device.id → {"retryCount": int, "lastUpdate": str|None}
+		# dict keyed by device.id → per-device runtime state (locks, cached
+		# transport, retry counters, power-off grace window, ...)
 		self.deviceList = {}
+		# In-progress encrypted PIN pairings from the device config dialog, keyed by IP.
+		self._pairings = {}
+		# IPs with a background "press Allow on the TV" wait in progress.
+		self._authorizing = set()
+		self._authorizingLock = threading.Lock()
+		self.runner = AsyncRunner()
 		self.pluginId = pluginId
 		self.pluginprefDirectory = '{}/Preferences/Plugins/com.ryanbuckner.indigoplugin.samsungtv'.format(
 			indigo.server.getInstallFolderPath()
@@ -100,10 +150,18 @@ class Plugin(indigo.PluginBase):
 		self.logger.info("{0:<30} {1}".format("Plugin ID:",         self.pluginId))
 		self.logger.info("{0:<30} {1}".format("Token path:",        self.path))
 		self.logger.info("{0:<30} {1}".format("Refresh frequency:", str(self.refresh_frequency) + " seconds"))
+		self.logger.info("{0:<30} {1}".format("samsungtvws version:", self._libVersion()))
 		self.logger.info("{0:<30} {1}".format("Indigo version:",    indigo.server.version))
 		self.logger.info("{0:<30} {1}".format("Python version:",    sys.version.replace('\n', '')))
 		self.logger.info("{0:<30} {1}".format("Python directory:",  sys.prefix.replace('\n', '')))
 		self.logger.info("{0:=^130}".format(""))
+
+		if not self.runner.available:
+			from transports import ASYNC_IMPORT_ERROR
+			self.logger.warning(
+				f"2014-2015 (H/J) and pre-2014 TV support is unavailable — samsungtvws async/encrypted "
+				f"extras failed to import: {ASYNC_IMPORT_ERROR}"
+			)
 
 		try:
 			if not os.path.exists(self.pluginprefDirectory):
@@ -122,6 +180,7 @@ class Plugin(indigo.PluginBase):
 				except Exception:
 					pass
 				self._closeTV(dev)
+		self.runner.stop()
 
 	def prepareToSleep(self):
 		self.logger.debug("Preparing for sleep — closing cached TV connections")
@@ -133,10 +192,7 @@ class Plugin(indigo.PluginBase):
 		self.logger.debug("Waking from sleep — refreshing all TV states")
 		for devId in list(self.deviceList.keys()):
 			if devId in indigo.devices:
-				try:
-					self.updatedevicestates(indigo.devices[devId])
-				except Exception:
-					self.logger.exception(f"Error refreshing device {devId} after wake")
+				self._backgroundPoll(indigo.devices[devId])
 
 	# ---------------------------------------------------------------------------
 	# Device lifecycle
@@ -152,9 +208,12 @@ class Plugin(indigo.PluginBase):
 			# running (and holding this entry's lock), replacing the dict would
 			# hand the new poll a fresh, uncontended lock — letting two polls
 			# race against the same physical TV at once.
+			self._closeTV(device)
 			entry = self.deviceList.setdefault(device.id, {})
 			entry["retryCount"] = 0
 			entry["lastUpdate"] = None
+			entry.pop("appListRequested", None)
+			entry.pop("macChecked", None)
 			self._ensureTokenFile(device)
 			# Poll in the background instead of inline: Indigo calls deviceStartComm()
 			# serially for every device at launch, so a slow/offline TV here would
@@ -186,15 +245,22 @@ class Plugin(indigo.PluginBase):
 				self.logger.error(f"Could not create token file for \"{device.name}\" at {token_path}: {e}")
 
 	def _backgroundPoll(self, device, delay=0):
-		threading.Thread(target=self._safePoll, args=(device, delay), daemon=True).start()
+		threading.Thread(target=self._safePoll, args=(device.id, delay), daemon=True).start()
 
-	def _safePoll(self, device, delay=0):
+	def _schedulePolls(self, device, delays):
+		"""Poll again shortly after a power change so the state catches up in
+		seconds instead of waiting up to a full refresh interval."""
+		for d in delays:
+			self._backgroundPoll(device, delay=d)
+
+	def _safePoll(self, devId, delay=0):
 		try:
 			if delay:
 				time.sleep(delay)
-			self.updatedevicestates(device)
+			if devId in indigo.devices and devId in self.deviceList:
+				self.updatedevicestates(indigo.devices[devId])
 		except Exception:
-			self.logger.exception(f"Error during background poll of {device.name}")
+			self.logger.exception(f"Error during background poll of device {devId}")
 
 	def deviceStopComm(self, device):
 		super().deviceStopComm(device)
@@ -240,11 +306,7 @@ class Plugin(indigo.PluginBase):
 				errorsDict['ipaddress'] = "Enter a valid IP address (e.g. 192.168.1.50)"
 				return (False, valuesDict, errorsDict)
 
-			port_str = valuesDict.get('port', '').strip()
-			if not port_str:
-				errorsDict = indigo.Dict()
-				errorsDict['port'] = "Port is a required field"
-				return (False, valuesDict, errorsDict)
+			port_str = valuesDict.get('port', '').strip() or str(WEBSOCKET_SSL_PORT)
 			try:
 				if not (1 <= int(port_str) <= 65535):
 					raise ValueError
@@ -253,6 +315,25 @@ class Plugin(indigo.PluginBase):
 				errorsDict = indigo.Dict()
 				errorsDict['port'] = "Port must be a number between 1 and 65535"
 				return (False, valuesDict, errorsDict)
+			valuesDict['port'] = port_str
+
+			wol = valuesDict.get('wolBroadcast', '').strip()
+			if wol:
+				try:
+					ipaddress_module.ip_address(wol)
+				except ValueError:
+					errorsDict = indigo.Dict()
+					errorsDict['wolBroadcast'] = "Enter a broadcast IP address (e.g. 192.168.1.255) or leave blank"
+					return (False, valuesDict, errorsDict)
+
+			# If the IP or the forced protocol changed, the previously detected
+			# protocol/port no longer applies — clear it so the next poll re-detects.
+			if devId and devId in indigo.devices:
+				old = indigo.devices[devId].pluginProps
+				if old.get('ipaddress', '') != ip_str or old.get('method', METHOD_AUTO) != valuesDict.get('method', METHOD_AUTO):
+					if not valuesDict.get('detectedFor', '') == ip_str:
+						valuesDict['resolvedMethod'] = ""
+						valuesDict['restPort'] = ""
 
 			valuesDict['address'] = ip_str
 
@@ -266,7 +347,34 @@ class Plugin(indigo.PluginBase):
 				token_name = f"tv-token-{ip_str.replace('.', '-')}.txt"
 			valuesDict['token'] = token_name
 
+			method = valuesDict.get('method', METHOD_AUTO)
+			effective = method if method != METHOD_AUTO else valuesDict.get('resolvedMethod', '')
+			if effective == METHOD_ENCRYPTED and not (valuesDict.get('encToken') and valuesDict.get('encSessionId')):
+				self.logger.warning(
+					f"Samsung TV at {ip_str} uses the 2014-2015 encrypted protocol and isn't PIN-paired yet — "
+					"status will work, but remote keys won't until you pair (Edit Device → Pair / Authorize)"
+				)
+
 		return (True, valuesDict)
+
+	def getDeviceConfigUiValues(self, pluginProps, typeId, devId):
+		"""Initial values when the device dialog opens. Indigo doesn't reliably
+		apply a Devices.xml defaultValue to a menu whose options come from a
+		dynamic list, so "Turn On using" opened blank on new devices. Set it
+		here whenever the stored value isn't a real option — new devices,
+		devices created before the option existed, or an action group that has
+		since been deleted."""
+		valuesDict = indigo.Dict(pluginProps)
+		errorsDict = indigo.Dict()
+		if typeId == "televisions":
+			current = valuesDict.get('turnOnActionGroup', '')
+			valid = {value for value, _label in self.getActionGroupList()}
+			if current not in valid:
+				valuesDict['turnOnActionGroup'] = TURN_ON_WOL
+		return (valuesDict, errorsDict)
+
+	def closedDeviceConfigUi(self, valuesDict, userCancelled, typeId, devId):
+		self._pairings.pop(valuesDict.get('ipaddress', '').strip(), None)
 
 	def validatePrefsConfigUi(self, valuesDict):
 		try:
@@ -293,6 +401,194 @@ class Plugin(indigo.PluginBase):
 	def menu_callback(self, valuesDict, *args, **kwargs):
 		self.logger.debug(f"Menu callback: {valuesDict}")
 		return valuesDict
+
+	# ---------------------------------------------------------------------------
+	# Device config dialog buttons: Detect TV / Pair / Submit PIN
+	# ---------------------------------------------------------------------------
+	def detectTVButton(self, valuesDict, typeId, devId):
+		ip = valuesDict.get('ipaddress', '').strip()
+		if not ip:
+			valuesDict['detectedInfo'] = "Enter the TV's IP address first."
+			return valuesDict
+		try:
+			port = int(valuesDict.get('port', '') or WEBSOCKET_SSL_PORT)
+		except ValueError:
+			port = WEBSOCKET_SSL_PORT
+		try:
+			# Short per-probe timeout: this runs inside a dialog button callback,
+			# which must answer the Indigo client within a few seconds even when
+			# every probe fails (TV off).
+			result = self._detect(ip, valuesDict.get('method', METHOD_AUTO), port, timeout=1.5)
+		except Exception as e:
+			detail, _ = self._describeException(e)
+			valuesDict['detectedInfo'] = f"No response from {ip}. Make sure the TV is ON and the IP is right. ({detail[:160]})"
+			return valuesDict
+
+		dev = (result['info'] or {}).get('device', {})
+		model = dev.get('modelName', '') or "unknown model"
+		valuesDict['resolvedMethod'] = result['method']
+		valuesDict['restPort'] = str(result['restPort'] or "")
+		valuesDict['model'] = dev.get('modelName', '')
+		valuesDict['frameTV'] = "true" if dev.get('FrameTVSupport') == "true" else "false"
+		valuesDict['detectedFor'] = ip
+		mac = dev.get('wifiMac', '') or self._macFromArp(ip)
+		if mac and not valuesDict.get('macaddress'):
+			valuesDict['macaddress'] = mac
+
+		msg = f"{dev.get('name', 'Samsung TV')} — {model} — {METHOD_LABELS[result['method']]}"
+		if result['method'] == METHOD_ENCRYPTED:
+			paired = valuesDict.get('encToken') and valuesDict.get('encSessionId')
+			msg += ". Already paired." if paired else ". Needs PIN pairing: click Pair / Authorize."
+		elif result['method'] == METHOD_LEGACY:
+			msg += ". Click Pair / Authorize and press Allow on the TV."
+		elif result['restPort'] == WEBSOCKET_SSL_PORT:
+			msg += ". Click Pair / Authorize and press Allow on the TV if prompted."
+		valuesDict['detectedInfo'] = msg
+		return valuesDict
+
+	def pairTVButton(self, valuesDict, typeId, devId):
+		ip = valuesDict.get('ipaddress', '').strip()
+		if not ip:
+			valuesDict['pairingStatus'] = "Enter the TV's IP address first."
+			return valuesDict
+		method = valuesDict.get('method', METHOD_AUTO)
+		if method == METHOD_AUTO:
+			# Don't chain a detection in here — detect + pair in one callback
+			# could exceed the client's response window. Detect is its own click.
+			# The stored protocol is trustworthy if Detect TV was run for this IP
+			# in the dialog, or polling detected it for the device's saved IP.
+			saved_ip = indigo.devices[devId].pluginProps.get('ipaddress', '') if devId in indigo.devices else ''
+			known_for = valuesDict.get('detectedFor') or saved_ip
+			if not valuesDict.get('resolvedMethod') or known_for != ip:
+				valuesDict['pairingStatus'] = "Click Detect TV first (with the TV turned on), then Pair / Authorize."
+				return valuesDict
+			method = valuesDict['resolvedMethod']
+
+		# Every button callback must answer the Indigo client within a few
+		# seconds — if it doesn't, the client times out ("timeout waiting for
+		# plugin response ... UiAction") and then mis-pairs the late reply with
+		# its next request ("unexpected packet response UiAction (waiting for
+		# GetUiDynamicList)"). So the open-ended wait for someone to press
+		# Allow on the TV runs in the background and reports to the event log.
+		# Nothing needs to come back to the dialog: websocket TVs write the
+		# granted token straight to the token file, and legacy TVs remember the
+		# allowed remote themselves.
+		try:
+			if method == METHOD_ENCRYPTED:
+				pairing = EncryptedPairing(self.runner, ip)
+				pairing.start(timeout=DIALOG_TIMEOUT)
+				self._pairings[ip] = pairing
+				valuesDict['pairingStatus'] = "A PIN should now be showing on the TV. Type it into the PIN field and click Submit PIN."
+			elif method == METHOD_LEGACY:
+				started = self._authorizeInBackground(
+					ip, lambda: LegacyTransport(self.runner, ip).authorize(timeout=AUTHORIZE_WAIT))
+				valuesDict['pairingStatus'] = self._authorizeStatus(started)
+			elif method == METHOD_WEBSOCKET:
+				port = int(valuesDict.get('restPort') or valuesDict.get('port') or WEBSOCKET_SSL_PORT)
+				token_name = os.path.basename(valuesDict.get('token', '').strip()) or f"tv-token-{ip.replace('.', '-')}.txt"
+				token_path = self.path + token_name
+				if not os.path.exists(token_path):
+					open(token_path, 'w').close()
+				valuesDict['token'] = token_name
+
+				def authorize_ws():
+					# The long timeout is the window for pressing Allow; the
+					# library writes the granted token to the token file.
+					tv = samsungtvws.SamsungTVWS(host=ip, port=port, token_file=token_path, timeout=AUTHORIZE_WAIT)
+					try:
+						tv.open()
+					finally:
+						tv.close()
+				started = self._authorizeInBackground(ip, authorize_ws)
+				valuesDict['pairingStatus'] = self._authorizeStatus(started)
+			else:
+				valuesDict['pairingStatus'] = "Couldn't determine the TV's protocol — click Detect TV with the TV turned on."
+		except Exception as e:
+			detail, _ = self._describeException(e)
+			valuesDict['pairingStatus'] = f"Pairing failed: {detail[:200]}"
+		return valuesDict
+
+	def _authorizeStatus(self, started):
+		if not started:
+			return "Already waiting for this TV — press Allow on the TV. The result will appear in the Indigo event log."
+		return (f"Press Allow on the TV now (you have {AUTHORIZE_WAIT} seconds). The result will appear in the "
+				"Indigo event log — you can click Save at any time.")
+
+	def _authorizeInBackground(self, ip, authorize):
+		"""Run a blocking "wait for Allow on the TV" outside the dialog
+		callback. Returns False if one is already running for this IP."""
+		with self._authorizingLock:
+			if ip in self._authorizing:
+				return False
+			self._authorizing.add(ip)
+
+		def run():
+			try:
+				authorize()
+				self.logger.info(f"Samsung TV at {ip}: remote control authorized")
+			except UnauthorizedError:
+				self.logger.error(
+					f"Samsung TV at {ip} refused the remote. On the TV: Settings → General → External Device Manager → "
+					"Device Connection Manager — allow (or remove) the entry, then click Pair / Authorize again."
+				)
+			except Exception as e:
+				detail, _ = self._describeException(e)
+				if self._isNetworkError(e):
+					self.logger.error(f"Samsung TV at {ip}: no Allow received within {AUTHORIZE_WAIT} s, or the TV stopped responding ({detail}). Click Pair / Authorize to try again.")
+				else:
+					self.logger.error(f"Samsung TV at {ip}: authorization failed: {detail}")
+			finally:
+				with self._authorizingLock:
+					self._authorizing.discard(ip)
+
+		threading.Thread(target=run, name=f"SamsungTV-authorize-{ip}", daemon=True).start()
+		return True
+
+	def submitPinButton(self, valuesDict, typeId, devId):
+		ip = valuesDict.get('ipaddress', '').strip()
+		pin = re.sub(r"\D", "", valuesDict.get('pin', ''))
+		if not pin:
+			valuesDict['pairingStatus'] = "Enter the PIN shown on the TV."
+			return valuesDict
+		pairing = self._pairings.get(ip)
+		if pairing is None:
+			valuesDict['pairingStatus'] = "No pairing in progress — click Pair / Authorize to show a PIN on the TV first."
+			return valuesDict
+		try:
+			token, session_id = pairing.finish(pin, timeout=DIALOG_TIMEOUT)
+		except Exception as e:
+			detail, _ = self._describeException(e)
+			self._pairings.pop(ip, None)
+			valuesDict['pairingStatus'] = f"Pairing failed ({detail[:160]}). Click Pair / Authorize to get a new PIN."
+			return valuesDict
+		if not token:
+			valuesDict['pairingStatus'] = "Wrong PIN — check the TV and try again."
+			return valuesDict
+		self._pairings.pop(ip, None)
+		valuesDict['encToken'] = token
+		valuesDict['encSessionId'] = str(session_id)
+		valuesDict['pin'] = ""
+		valuesDict['pairingStatus'] = "Paired! Click Save."
+		return valuesDict
+
+	def getActionGroupList(self, filter="", valuesDict=None, typeId="", targetId=0):
+		groups = [(str(ag.id), ag.name) for ag in indigo.actionGroups]
+		# A real sentinel value, not "": Indigo drops menu options whose value is
+		# an empty string, which left no way to choose "none".
+		return [(TURN_ON_WOL, "Wake-on-LAN (default)")] + sorted(groups, key=lambda g: g[1].lower())
+
+	def _turnOnActionGroup(self, device):
+		"""The action group chosen to turn this TV on, or None for Wake-on-LAN.
+		Treats the sentinel, a blank/missing value (devices created before this
+		option existed) and a since-deleted action group all as Wake-on-LAN."""
+		value = device.pluginProps.get('turnOnActionGroup', '') or TURN_ON_WOL
+		if value == TURN_ON_WOL:
+			return None
+		try:
+			return indigo.actionGroups[int(value)]
+		except (ValueError, KeyError, TypeError):
+			self.logger.warning(f"\"{device.name}\": the turn-on action group (id {value}) no longer exists — using Wake-on-LAN")
+			return None
 
 	# ---------------------------------------------------------------------------
 	# Debug helpers
@@ -336,27 +632,37 @@ class Plugin(indigo.PluginBase):
 			return
 		self.logger.info("{0:=^130}".format(" Samsung TV Device Info "))
 		for dev in devices:
+			props = dev.pluginProps
+			method = self._effectiveMethod(dev)
 			self.logger.info("{0:<20} {1}".format("Device name:",  dev.name))
-			self.logger.info("{0:<20} {1}".format("IP address:",   dev.pluginProps.get('ipaddress', 'not set')))
-			self.logger.info("{0:<20} {1}".format("MAC address:",  dev.pluginProps.get('macaddress', '') or dev.states.get('macaddress', 'not yet discovered')))
+			self.logger.info("{0:<20} {1}".format("IP address:",   props.get('ipaddress', 'not set')))
+			self.logger.info("{0:<20} {1}".format("Model:",        props.get('model', '') or dev.states.get('model', '') or 'unknown'))
+			self.logger.info("{0:<20} {1}".format("Protocol:",     METHOD_LABELS.get(method, "not detected yet") + (" (forced)" if props.get('method', METHOD_AUTO) != METHOD_AUTO else "")))
+			if method == METHOD_ENCRYPTED:
+				self.logger.info("{0:<20} {1}".format("PIN paired:", "yes" if props.get('encToken') else "NO — Edit Device → Pair / Authorize"))
+			self.logger.info("{0:<20} {1}".format("MAC address:",  props.get('macaddress', '') or dev.states.get('macaddress', 'not yet discovered')))
 			self.logger.info("{0:<20} {1}".format("OS:",           dev.states.get('os', 'unknown')))
+			apps = self._installedApps(dev)
+			if apps:
+				self.logger.info("{0:<20} {1}".format("Installed apps:", ", ".join(sorted(apps.keys()))))
 			self.logger.info("{0:-^130}".format(""))
 		self.logger.info("{0:=^130}".format(""))
 
 	def discoverSamsungTVs(self):
-		SSDP_ADDR = "239.255.255.255"
+		SSDP_ADDR = "239.255.255.250"
 		SSDP_PORT = 1900
 		SSDP_MX   = 4
 
 		# Multiple STs maximize coverage across Samsung firmware versions.
-		# ssdp:all catches everything; the narrow ST catches older models that only respond to it.
+		# ssdp:all catches everything; the narrow STs catch older models that only respond to them.
 		search_targets = [
 			"ssdp:all",
 			"upnp:rootdevice",
 			"urn:samsung.com:device:RemoteControlReceiver:1",
+			"urn:dial-multiscreen-org:service:dial:1",
 		]
 
-		self.logger.info("Scanning network for Samsung TVs — this takes about 6 seconds...")
+		self.logger.info("Scanning network for Samsung TVs — this takes about 20 seconds...")
 
 		candidate_ips = set()
 
@@ -369,6 +675,7 @@ class Plugin(indigo.PluginBase):
 				f"ST: {st}",
 				"", ""
 			])
+			sock = None
 			try:
 				sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 				sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -396,57 +703,66 @@ class Plugin(indigo.PluginBase):
 			except Exception as exc:
 				self.logger.debug(f"SSDP search for '{st}' failed: {exc}")
 			finally:
-				try:
-					sock.close()
-				except Exception:
-					pass
+				if sock is not None:
+					try:
+						sock.close()
+					except Exception:
+						pass
 
-		if not candidate_ips:
-			self.logger.info("No Samsung TVs found. Make sure TVs are powered on and on the same network segment.")
-			return
+		# Every configured TV is a candidate too, so a TV that ignores SSDP still
+		# gets its protocol reported here.
+		configured = {
+			d.pluginProps.get('ipaddress', ''): d.name
+			for d in indigo.devices.iter("self")
+			if d.deviceTypeId == "televisions"
+		}
 
-		# Confirm each candidate is actually a Samsung TV by querying its REST API.
-		# rest_device_info() is unauthenticated, so the plain REST client is used
-		# directly here — no token file needed (and none left behind on disk).
+		# Classify each candidate the same way device auto-detection does.
 		found = {}
-		for ip in candidate_ips:
+		for ip in sorted(candidate_ips | {ip for ip in configured if ip}):
 			try:
-				rest = samsungtvws.rest.SamsungTVRest(host=ip, port=8002, timeout=2.0)
-				info = rest.rest_device_info().get('device', {})
-				found[ip] = info
-				self.logger.debug(f"Validated Samsung TV at {ip}: {info.get('modelName', 'unknown')}")
+				result = self._detect(ip, METHOD_AUTO, WEBSOCKET_SSL_PORT, timeout=2.0)
+				found[ip] = result
 			except Exception:
-				self.logger.debug(f"Could not validate {ip} via REST API — skipping")
+				self.logger.debug(f"{ip} did not answer as a Samsung TV — skipping")
 
 		if not found:
 			self.logger.info("No Samsung TVs found. Make sure TVs are powered on and on the same network segment.")
 			return
 
-		configured_ips = {
-			d.pluginProps.get('ipaddress', '')
-			for d in indigo.devices.iter("self")
-			if d.deviceTypeId == "televisions"
-		}
-
-		self.logger.info("{0:=^130}".format(f" Discovered {len(found)} Samsung TV(s) "))
-		for ip, info in found.items():
-			status = "(already configured)" if ip in configured_ips else "(not yet configured)"
+		self.logger.info("{0:=^130}".format(f" Found {len(found)} Samsung TV(s) "))
+		for ip, result in found.items():
+			info = (result['info'] or {}).get('device', {})
+			status = f"(configured as \"{configured[ip]}\")" if ip in configured else "(not yet configured)"
 			self.logger.info(f"  IP Address:  {ip}  {status}")
 			self.logger.info(f"  Name:        {info.get('name', 'unknown')}")
 			self.logger.info(f"  Model:       {info.get('modelName', 'unknown')}")
-			self.logger.info(f"  OS:          {info.get('OS', 'unknown')}")
-			self.logger.info(f"  MAC:         {info.get('wifiMac', 'unknown')}")
+			self.logger.info(f"  Protocol:    {METHOD_LABELS[result['method']]}")
+			if result['method'] == METHOD_ENCRYPTED:
+				self.logger.info("               needs one-time PIN pairing (Edit Device → Pair / Authorize)")
+			self.logger.info(f"  MAC:         {info.get('wifiMac', '') or self._macFromArp(ip) or 'unknown'}")
 			self.logger.info("{0:-^130}".format(""))
 		self.logger.info("{0:=^130}".format(""))
 
-	def _getPort(self, device):
-		"""Returns the configured port for a device, falling back to 8002 (the
-		default for Tizen TVs with token-based TLS auth) if unset or invalid."""
+	# ---------------------------------------------------------------------------
+	# Small helpers
+	# ---------------------------------------------------------------------------
+	def _libVersion(self):
 		try:
-			port = int(device.pluginProps.get('port', 8002) or 8002)
-			return port if 1 <= port <= 65535 else 8002
+			from importlib.metadata import version
+			return version("samsungtvws")
+		except Exception:
+			return "unknown"
+
+	def _getPort(self, device):
+		"""Returns the configured websocket port for a device, falling back to
+		8002 (the default for Tizen TVs with token-based TLS auth) if unset or
+		invalid."""
+		try:
+			port = int(device.pluginProps.get('port', WEBSOCKET_SSL_PORT) or WEBSOCKET_SSL_PORT)
+			return port if 1 <= port <= 65535 else WEBSOCKET_SSL_PORT
 		except (TypeError, ValueError):
-			return 8002
+			return WEBSOCKET_SSL_PORT
 
 	def _describeException(self, e):
 		"""Returns (detail_string, root_cause_exception) for an exception that
@@ -467,6 +783,19 @@ class Plugin(indigo.PluginBase):
 		if root is not e:
 			detail += f" (caused by {type(root).__name__}: {root})"
 		return detail, root
+
+	def _isNetworkError(self, e):
+		"""True when the failure means "nothing answered" (TV off / asleep /
+		unplugged / wrong IP), as opposed to "the TV answered with something
+		unexpected" — the two need very different messages."""
+		seen = set()
+		while e is not None and id(e) not in seen:
+			seen.add(id(e))
+			if isinstance(e, (OSError, TimeoutError, socket.timeout, HttpApiError,
+							  requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+				return True
+			e = e.__cause__ or e.__context__
+		return False
 
 	def _checkTcpPort(self, ip, port, timeout=3.0):
 		"""Bare TCP connect check — bypasses HTTP/TLS/samsungtvws entirely, to
@@ -493,39 +822,147 @@ class Plugin(indigo.PluginBase):
 			token_name = f"tv-token-{ip_str.replace('.', '-')}.txt"
 		return self.path + token_name
 
+	def _macFromArp(self, ip):
+		"""The MAC actually answering at this IP, from the Mac's ARP cache.
+		Better than the REST API's wifiMac for wired TVs: Samsung reports the
+		Wi-Fi MAC even when the TV is on Ethernet, and Wake-on-LAN has to target
+		the interface the TV is really using."""
+		try:
+			out = subprocess.run(["/usr/sbin/arp", "-n", ip], capture_output=True, text=True, timeout=3).stdout
+		except Exception:
+			return ""
+		m = re.search(r"\sat\s+([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})\s", out)
+		if not m:
+			return ""
+		return ":".join(octet.zfill(2) for octet in m.group(1).split(":")).upper()
+
+	def _updateProps(self, device, changes):
+		"""Write only the pluginProps that actually changed (each write is a
+		server round-trip)."""
+		props = device.pluginProps
+		dirty = False
+		for key, value in changes.items():
+			if value is None:
+				continue
+			if props.get(key, "") != value:
+				props[key] = value
+				dirty = True
+		if dirty:
+			device.replacePluginPropsOnServer(props)
+		return dirty
+
 	# ---------------------------------------------------------------------------
-	# TV connection helper — caches one SamsungTVWS object per device so repeated
-	# key sends reuse the same underlying WebSocket instead of paying a fresh
-	# handshake (and possible re-auth prompt on the TV) for every single button.
+	# Protocol detection — mirrors HA's async_get_device_info(): REST device
+	# info on 8002 then 8001; H/J models switch to the encrypted protocol on
+	# 8000; nothing on REST but 55000 open means a pre-2014 legacy TV.
 	# ---------------------------------------------------------------------------
-	def _getTV(self, device, forceNew=False):
+	def _probeRest(self, ip, ports, timeout):
+		last_err = None
+		for port in ports:
+			try:
+				info = samsungtvws.rest.SamsungTVRest(host=ip, port=port, timeout=timeout).rest_device_info()
+				if not isinstance(info, dict) or not isinstance(info.get('device'), dict):
+					raise UnexpectedResponse(f"/api/v2/ on port {port} returned no 'device' block: {str(info)[:200]}")
+				return port, info
+			except Exception as e:
+				last_err = e
+		raise last_err
+
+	def _detect(self, ip, method_pref, configured_port, timeout=3.0):
+		"""Returns {'method', 'restPort', 'info'}; raises if nothing answers."""
+		if method_pref == METHOD_LEGACY:
+			ok, detail = self._checkTcpPort(ip, LEGACY_PORT, timeout)
+			if not ok:
+				raise OSError(f"legacy port {LEGACY_PORT}: {detail}")
+			return {'method': METHOD_LEGACY, 'restPort': None, 'info': None}
+
+		ports = [configured_port] + [p for p in (WEBSOCKET_SSL_PORT, WEBSOCKET_NO_SSL_PORT) if p != configured_port]
+		try:
+			port, info = self._probeRest(ip, ports, timeout)
+		except Exception as rest_err:
+			if method_pref == METHOD_AUTO and self._checkTcpPort(ip, LEGACY_PORT, timeout)[0]:
+				return {'method': METHOD_LEGACY, 'restPort': None, 'info': None}
+			raise rest_err
+
+		if method_pref in (METHOD_WEBSOCKET, METHOD_ENCRYPTED):
+			method = method_pref
+		elif model_requires_encryption(info['device'].get('modelName')) and self._checkTcpPort(ip, ENCRYPTED_PORT, timeout)[0]:
+			method = METHOD_ENCRYPTED
+		else:
+			method = METHOD_WEBSOCKET
+		return {'method': method, 'restPort': port, 'info': info}
+
+	def _effectiveMethod(self, device):
+		pref = device.pluginProps.get('method', METHOD_AUTO) or METHOD_AUTO
+		if pref != METHOD_AUTO:
+			return pref
+		return device.pluginProps.get('resolvedMethod', '') or None
+
+	# ---------------------------------------------------------------------------
+	# Transport (remote-control connection) management
+	# ---------------------------------------------------------------------------
+	def _getTransport(self, device):
+		device = indigo.devices[device.id]
+		props = device.pluginProps
 		entry = self.deviceList.setdefault(device.id, {})
+		ip = props.get('ipaddress', '').strip()
+		method = self._effectiveMethod(device)
+		if method is None or (method != METHOD_LEGACY and not props.get('restPort')):
+			# Never detected (TV was off since the device was created) — try now.
+			result = self._detect(ip, props.get('method', METHOD_AUTO), self._getPort(device))
+			self._applyDetection(device, result)
+			device = indigo.devices[device.id]
+			props = device.pluginProps
+			method = result['method']
+
+		if method == METHOD_WEBSOCKET:
+			port = int(props.get('restPort') or self._getPort(device))
+			key = (method, ip, port, props.get('token', ''), props.get('frameTV', ''))
+		elif method == METHOD_ENCRYPTED:
+			key = (method, ip, props.get('encToken', ''), props.get('encSessionId', ''), props.get('model', ''))
+		else:
+			key = (method, ip)
+
+		if entry.get('transport') is not None and entry.get('transportKey') == key:
+			return entry['transport']
+
+		self._closeTV(device)
+		if method == METHOD_WEBSOCKET:
+			transport = WebsocketTransport(ip, port, self._getTokenPath(device), timeout=self.timeout,
+										   frame_tv=props.get('frameTV') == "true")
+		elif method == METHOD_ENCRYPTED:
+			transport = EncryptedTransport(self.runner, ip, props.get('encToken', ''), props.get('encSessionId', ''),
+										   model=props.get('model', ''))
+		else:
+			transport = LegacyTransport(self.runner, ip)
+		entry['transport'] = transport
+		entry['transportKey'] = key
+		return transport
+
+	def _getTV(self, device, forceNew=False):
+		"""Websocket transport for features that only exist on 2016+ TVs
+		(apps, text input, browser). Raises NotSupportedError otherwise."""
 		if forceNew:
 			self._closeTV(device)
-		if entry.get('tv') is None:
-			ipaddress  = device.pluginProps['ipaddress']
-			token_file = self._getTokenPath(device)
-			try:
-				entry['tv'] = samsungtvws.SamsungTVWS(
-					host=ipaddress, port=self._getPort(device),
-					token_file=token_file, timeout=self.timeout
-				)
-			except Exception:
-				self.logger.debug(f"Failed to create TV connection for {device.name}")
-				entry['tv'] = None
-		return entry.get('tv')
+		transport = self._getTransport(device)
+		if not isinstance(transport, WebsocketTransport):
+			raise NotSupportedError(f"this needs a 2016+ Tizen TV — \"{device.name}\" uses the {METHOD_LABELS[transport.method]} protocol")
+		return transport
 
 	def _closeTV(self, device):
 		entry = self.deviceList.get(device.id)
 		if not entry:
 			return
-		tv = entry.get('tv')
-		if tv is not None:
+		transport = entry.pop('transport', None)
+		entry.pop('transportKey', None)
+		if transport is not None:
 			try:
-				tv.close()
+				transport.close()
 			except Exception:
 				pass
-			entry['tv'] = None
+
+	def _powerOffInProgress(self, entry):
+		return entry.get('powerOffUntil', 0) > time.monotonic()
 
 	# ---------------------------------------------------------------------------
 	# State polling
@@ -533,84 +970,126 @@ class Plugin(indigo.PluginBase):
 	def updatedevicestates(self, device):
 		# Serialize polls per device: this can be entered concurrently from
 		# runConcurrentThread, wakeUp(), toggleDetailedDebugging(), the
-		# refresh_tv_data action, and the background poll kicked off by
-		# deviceStartComm() — without a lock, two overlapping polls would race
-		# on the same TV connection and on replacePluginPropsOnServer() below.
+		# refresh_tv_data action, and the background polls kicked off by
+		# deviceStartComm()/power actions — without a lock, two overlapping
+		# polls would race on replacePluginPropsOnServer() below.
 		entry = self.deviceList.setdefault(device.id, {})
 		lock = entry.setdefault('lock', threading.Lock())
 		with lock:
+			# Always work from a fresh copy: pluginProps may have been updated
+			# (detected protocol, MAC, app list) since the caller fetched it.
+			if device.id in indigo.devices:
+				device = indigo.devices[device.id]
 			self._pollDeviceStates(device)
 
+	def _applyDetection(self, device, result):
+		info = (result.get('info') or {}).get('device', {})
+		changes = {
+			'resolvedMethod': result['method'],
+			'restPort': str(result['restPort'] or ""),
+		}
+		if info.get('modelName'):
+			changes['model'] = info['modelName']
+		if info:
+			changes['frameTV'] = "true" if info.get('FrameTVSupport') == "true" else "false"
+		if self._updateProps(device, changes):
+			self.logger.info(f"\"{device.name}\": detected {info.get('modelName', 'TV')} — using the {METHOD_LABELS[result['method']]} protocol")
+			if result['method'] == METHOD_ENCRYPTED and not device.pluginProps.get('encToken'):
+				self.logger.warning(
+					f"\"{device.name}\" is a 2014-2015 model that needs one-time PIN pairing before remote "
+					"keys will work: Edit Device → Pair / Authorize → enter the PIN shown on the TV → Submit PIN → Save"
+				)
+
 	def _pollDeviceStates(self, device):
-		ipaddress  = device.pluginProps['ipaddress']
-		token_file = self._getTokenPath(device)
+		props = device.pluginProps
+		ipaddress = props.get('ipaddress', '').strip()
+		if not ipaddress:
+			return
+		entry = self.deviceList.setdefault(device.id, {})
+
+		if self._powerOffInProgress(entry):
+			self.logger.debug(f"\"{device.name}\": power-off in progress — skipping poll")
+			self._setOff(device)
+			return
 
 		self.logger.debug(f"Polling {device.name} ({device.id})")
 
+		method = self._effectiveMethod(device)
+		info = None
 		try:
-			tv   = samsungtvws.SamsungTVWS(host=ipaddress, port=self._getPort(device), token_file=token_file, timeout=self.timeout)
-			info = tv.rest_device_info()
-			tvState = info['device']['PowerState'].lower()
-			self.logger.debug(f"Power state of {device.name}: {tvState}")
-		except Exception as e:
-			entry = self.deviceList.setdefault(device.id, {})
-			retry_count = entry.get('retryCount', 0)
-			# Full root-cause detail (TLS vs. timeout vs. refused, etc.) lives
-			# in "Run Diagnostics" now — keep the routine log line short and
-			# point there instead of dumping the exception chain inline every
-			# time. The detail is still captured at debug level for anyone
-			# who already has verbose logging on.
-			detail, _root = self._describeException(e)
-			if retry_count == 0:
-				# First failure since the last successful poll (or ever, on a
-				# fresh device) — log it loudly. This is the only signal a user
-				# gets that the configured IP address is wrong, so it must not
-				# be debug-only.
-				self.logger.error(f"\"{device.name}\": cannot reach {ipaddress} — run \"Run Diagnostics\" on this device (via an Action Group), or Plugins → SamsungTV → Run Diagnostics on All TVs, for details")
+			if method == METHOD_LEGACY:
+				ok, detail = self._checkTcpPort(ipaddress, LEGACY_PORT, self.timeout)
+				if not ok:
+					raise OSError(f"port {LEGACY_PORT}: {detail}")
+			elif method and props.get('restPort'):
+				_port, info = self._probeRest(ipaddress, [int(props['restPort'])], self.timeout)
 			else:
-				self.logger.debug(f"\"{device.name}\": still unreachable at {ipaddress} (attempt {retry_count + 1}): {detail}")
-			device.setErrorStateOnServer("Unreachable")
-			device.updateStatesOnServer([
-				{'key': 'status',     'value': 'off'},
-				{'key': 'onOffState', 'value': False},
-			])
-			device.updateStateImageOnServer(indigo.kStateImageSel.SensorOff)
-			entry['retryCount'] = retry_count + 1
+				result = self._detect(ipaddress, props.get('method', METHOD_AUTO), self._getPort(device), self.timeout)
+				self._applyDetection(device, result)
+				device = indigo.devices[device.id]
+				props = device.pluginProps
+				method, info = result['method'], result['info']
+		except Exception as e:
+			self._handlePollFailure(device, entry, e, ipaddress)
 			return
 
+		# Power state. Only 2018+ firmware reports PowerState; when it's
+		# missing (2014-2017 TVs), answering at all means the TV is on — these
+		# sets drop off the network in standby. This is the fix for TVs that
+		# were permanently "unreachable" because the plugin used to require it.
+		dev_info = (info or {}).get('device', {})
+		power_state = (dev_info.get('PowerState') or "").strip().lower()
+		if power_state:
+			tvState = "on" if power_state == "on" else power_state
+		else:
+			tvState = "on"
+		is_on = tvState == "on"
+		self.logger.debug(f"Power state of {device.name}: {tvState}" + ("" if power_state else " (inferred — TV doesn't report PowerState)"))
+
 		# Clear any previous error badge, and announce success the same way
-		# failures are announced — a successful poll was previously silent
-		# (debug-only), so there was no positive confirmation in the log that
-		# a TV actually connected on a given reload, only an absence of errors.
+		# failures are announced.
 		device.setErrorStateOnServer(None)
-		entry = self.deviceList.setdefault(device.id, {})
-		if entry.get('retryCount', 0) > 0:
-			self.logger.info(f"\"{device.name}\": reachable again at {ipaddress}")
+		previous = device.states.get('status', '')
+		if entry.get('retryCount', 0) > 0 and entry.get('lastFailureKind') == 'unexpected':
+			self.logger.info(f"\"{device.name}\": responding normally again at {ipaddress}")
 		elif not entry.get('everConnected'):
-			# First successful poll since this device started (e.g. right
-			# after a plugin reload) — confirm it loudly once, then go quiet
-			# for routine repeat successes so the log isn't spammed every
-			# refresh_frequency seconds for a TV that's working fine.
-			self.logger.info(f"\"{device.name}\": connected successfully at {ipaddress}")
+			self.logger.info(f"\"{device.name}\": connected at {ipaddress} — {METHOD_LABELS.get(method, method)}, TV is {tvState}")
+		elif previous != tvState:
+			self.logger.info(f"\"{device.name}\" is {tvState}")
 		entry['everConnected'] = True
+		entry['retryCount'] = 0
+		entry.pop('lastFailureKind', None)
 
-		# Persist MAC into pluginProps so WOL works even before first successful poll
-		mac = info['device'].get('wifiMac', '')
-		if mac and device.pluginProps.get('macaddress', '') != mac:
-			props = device.pluginProps
-			props['macaddress'] = mac
-			device.replacePluginPropsOnServer(props)
+		# MAC for Wake-on-LAN: the MAC actually answering at this IP (ARP) beats
+		# the REST wifiMac, which is wrong for TVs on Ethernet. Checked once per
+		# device start.
+		mac = props.get('macaddress', '')
+		if not entry.get('macChecked'):
+			entry['macChecked'] = True
+			arp_mac = self._macFromArp(ipaddress)
+			best = arp_mac or dev_info.get('wifiMac', '')
+			if best and best.upper() != mac.upper():
+				self._updateProps(device, {'macaddress': best})
+				self.logger.debug(f"\"{device.name}\": MAC for Wake-on-LAN set to {best}" + (" (from ARP)" if arp_mac else " (from TV)"))
+				device = indigo.devices[device.id]
+				mac = best
 
-		# Detect currently running app and read volume — only meaningful when the TV is on
+		# Detect currently running app — only meaningful when the TV is on, and
+		# the per-app REST status endpoint only exists on 2016+ (websocket) TVs.
 		current_app = ""
-		if tvState == 'on' and device.pluginProps.get('detectApp', True):
+		if is_on and method == METHOD_WEBSOCKET and props.get('detectApp', True):
 			current_app = self._getCurrentApp(ipaddress, device)
 
-		volume = self._getVolumeUPnP(ipaddress) if tvState == 'on' else None
+		# Fetch the TV's own installed-app list once per device start (2016+).
+		if is_on and method == METHOD_WEBSOCKET and not entry.get('appListRequested'):
+			entry['appListRequested'] = True
+			threading.Thread(target=self._refreshAppList, args=(device.id, False), daemon=True).start()
+
+		volume = self._getVolumeUPnP(ipaddress) if is_on else None
 		if volume is not None:
 			self.logger.debug(f"Volume for {device.name}: {volume}")
 
-		muted = self._getMuteUPnP(ipaddress) if tvState == 'on' else None
+		muted = self._getMuteUPnP(ipaddress) if is_on else None
 		if muted is not None:
 			self.logger.debug(f"Mute state for {device.name}: {muted}")
 
@@ -623,21 +1102,25 @@ class Plugin(indigo.PluginBase):
 			current_source = device.states.get("currentSource", "Smart Hub") or "Smart Hub"
 
 		device_states = [
-			{'key': 'status',          'value': tvState},
-			{'key': 'onOffState',      'value': tvState == 'on'},
-			{'key': 'name',            'value': info['device'].get('name', '')},
-			{'key': 'os',              'value': info['device'].get('OS', '')},
-			{'key': 'macaddress',      'value': mac},
-			{'key': 'device_id',       'value': info['device'].get('id', '')},
-			{'key': 'model',           'value': info['device'].get('modelName', '')},
-			{'key': 'tokenauthsupport','value': info['device'].get('TokenAuthSupport', '')},
-			{'key': 'voicesupport',    'value': info['device'].get('VoiceSupport', '')},
-			{'key': 'firmwareversion', 'value': info['device'].get('firmwareVersion', '')},
-			{'key': 'networktype',     'value': info['device'].get('networkType', '')},
-			{'key': 'type',            'value': info.get('type', '')},
-			{'key': 'currentApp',      'value': current_app},
-			{'key': 'currentSource',   'value': current_source},
+			{'key': 'status',           'value': tvState},
+			{'key': 'onOffState',       'value': is_on},
+			{'key': 'connectionMethod', 'value': method or ""},
+			{'key': 'macaddress',       'value': mac},
+			{'key': 'currentApp',       'value': current_app},
+			{'key': 'currentSource',    'value': current_source},
 		]
+		if dev_info:
+			device_states += [
+				{'key': 'name',            'value': dev_info.get('name', '')},
+				{'key': 'os',              'value': dev_info.get('OS', '')},
+				{'key': 'device_id',       'value': dev_info.get('id', '')},
+				{'key': 'model',           'value': dev_info.get('modelName', '')},
+				{'key': 'tokenauthsupport','value': dev_info.get('TokenAuthSupport', '')},
+				{'key': 'voicesupport',    'value': dev_info.get('VoiceSupport', '')},
+				{'key': 'firmwareversion', 'value': dev_info.get('firmwareVersion', '')},
+				{'key': 'networktype',     'value': dev_info.get('networkType', '')},
+				{'key': 'type',            'value': info.get('type', '')},
+			]
 		if volume is not None:
 			device_states.append({'key': 'volumeLevel', 'value': volume})
 		if muted is not None:
@@ -651,12 +1134,53 @@ class Plugin(indigo.PluginBase):
 
 		device.updateStatesOnServer(device_states)
 		device.updateStateImageOnServer(
-			indigo.kStateImageSel.SensorOn if tvState == 'on' else indigo.kStateImageSel.SensorOff
+			indigo.kStateImageSel.SensorOn if is_on else indigo.kStateImageSel.SensorOff
 		)
+		entry['lastUpdate'] = str(datetime.datetime.now())
 
-		if device.id in self.deviceList:
-			self.deviceList[device.id]['lastUpdate'] = str(datetime.datetime.now())
-			self.deviceList[device.id]['retryCount'] = 0
+	def _setOff(self, device):
+		device.updateStatesOnServer([
+			{'key': 'status',     'value': 'off'},
+			{'key': 'onOffState', 'value': False},
+			{'key': 'currentApp', 'value': ''},
+		])
+		device.updateStateImageOnServer(indigo.kStateImageSel.SensorOff)
+
+	def _handlePollFailure(self, device, entry, e, ipaddress):
+		detail, _root = self._describeException(e)
+		retry_count = entry.get('retryCount', 0)
+		if self._isNetworkError(e):
+			# Nothing answered. For a TV that's been seen before this is just
+			# "off" — most Samsung TVs drop off the network in standby — so it's
+			# not an error. For a TV that has *never* answered, the IP may be
+			# wrong, so say so (once) and badge the device.
+			seen_before = bool(device.states.get('model') or entry.get('everConnected'))
+			if retry_count == 0 or entry.get('lastFailureKind') != 'network':
+				if seen_before:
+					if device.states.get('status') in ('on', 'standby'):
+						self.logger.info(f"\"{device.name}\" is off (not responding at {ipaddress})")
+					device.setErrorStateOnServer(None)
+				else:
+					self.logger.warning(
+						f"\"{device.name}\": no response from {ipaddress} — the TV is off, or the IP address is wrong. "
+						"Turn the TV on and run Plugins → SamsungTV → Run Diagnostics on All TVs if this persists."
+					)
+					device.setErrorStateOnServer("no response")
+			else:
+				self.logger.debug(f"\"{device.name}\": still not responding at {ipaddress} (attempt {retry_count + 1}): {detail}")
+			entry['lastFailureKind'] = 'network'
+			self._setOff(device)
+		else:
+			# The TV answered, but with something we didn't expect — that's a
+			# real problem worth surfacing with the actual detail, not a generic
+			# "cannot reach".
+			if retry_count == 0 or entry.get('lastFailureKind') != 'unexpected':
+				self.logger.error(f"\"{device.name}\": the TV at {ipaddress} answered, but the response couldn't be used: {detail}")
+			else:
+				self.logger.debug(f"\"{device.name}\": unexpected response again (attempt {retry_count + 1}): {detail}")
+			entry['lastFailureKind'] = 'unexpected'
+			device.setErrorStateOnServer("error")
+		entry['retryCount'] = retry_count + 1
 
 	def _getCurrentApp(self, ip, device):
 		"""Poll the TV for the foreground app from COMMON_APPS. Returns app name or empty string.
@@ -681,7 +1205,8 @@ class Plugin(indigo.PluginBase):
 			ordered_names.insert(0, last_app)
 
 		probe_timeout = min(self.timeout, 1.0)
-		rest = samsungtvws.rest.SamsungTVRest(host=ip, port=self._getPort(device), timeout=probe_timeout)
+		port = int(device.pluginProps.get('restPort') or self._getPort(device))
+		rest = samsungtvws.rest.SamsungTVRest(host=ip, port=port, timeout=probe_timeout)
 
 		running_fallback = ""
 		for app_name in ordered_names:
@@ -700,6 +1225,46 @@ class Plugin(indigo.PluginBase):
 		entry['lastApp'] = running_fallback or None
 		return running_fallback
 
+	# ---------------------------------------------------------------------------
+	# Installed apps (2016+): fetched from the TV itself, like HA's source list
+	# ---------------------------------------------------------------------------
+	def _installedApps(self, device):
+		try:
+			return json.loads(device.pluginProps.get('installedApps', '') or '{}')
+		except ValueError:
+			return {}
+
+	def _refreshAppList(self, devId, announce):
+		if devId not in indigo.devices:
+			return
+		device = indigo.devices[devId]
+		try:
+			apps = self._getTV(device).app_list()
+		except Exception as e:
+			if announce:
+				self.logger.error(f"Couldn't fetch the app list from \"{device.name}\": {self._describeException(e)[0]}")
+			return
+		if not apps:
+			if announce:
+				self.logger.warning(f"\"{device.name}\" didn't return an app list (not all models support it)")
+			return
+		mapping = {}
+		for app in apps:
+			name, app_id = app.get('name'), app.get('appId')
+			if name and app_id:
+				# app_type 4 = native launch; everything else is a deep link.
+				mapping[name] = [app_id, "NATIVE_LAUNCH" if str(app.get('app_type')) == "4" else "DEEP_LINK"]
+		device = indigo.devices[devId]
+		self._updateProps(device, {'installedApps': json.dumps(mapping, sort_keys=True)})
+		msg = f"\"{device.name}\": {len(mapping)} installed apps available to Launch App"
+		self.logger.info(msg) if announce else self.logger.debug(msg)
+
+	def refreshAppListAction(self, pluginAction, device, callerWaitingForResult=None):
+		self._refreshAppList(device.id, True)
+
+	# ---------------------------------------------------------------------------
+	# UPnP RenderingControl (volume / mute)
+	# ---------------------------------------------------------------------------
 	def _upnpAction(self, ip, action, extra_body=""):
 		"""Call a UPnP RenderingControl:1 action on the TV (port 9197).
 		Returns the parsed XML response root, or None on failure."""
@@ -737,7 +1302,10 @@ class Plugin(indigo.PluginBase):
 		if root is None:
 			return None
 		el = root.find('.//CurrentVolume')
-		return int(el.text) if el is not None else None
+		try:
+			return int(el.text) if el is not None else None
+		except (TypeError, ValueError):
+			return None
 
 	def _setVolumeUPnP(self, ip, volume):
 		"""Set an absolute volume (0-100) via UPnP RenderingControl.
@@ -761,6 +1329,16 @@ class Plugin(indigo.PluginBase):
 		Returns True if the TV acknowledged the request."""
 		root = self._upnpAction(ip, "SetMute", f"<DesiredMute>{1 if muted else 0}</DesiredMute>")
 		return root is not None
+
+	def _refreshVolumeMute(self, device):
+		ip = device.pluginProps.get('ipaddress', '')
+		volume = self._getVolumeUPnP(ip)
+		if volume is not None:
+			device.updateStateOnServer("volumeLevel", volume)
+		muted = self._getMuteUPnP(ip)
+		if muted is not None:
+			device.updateStateOnServer("isMuted", muted)
+		return volume, muted
 
 	def refresh_tv_data(self, pluginAction, device):
 		self.updatedevicestates(device)
@@ -788,9 +1366,16 @@ class Plugin(indigo.PluginBase):
 			self._runDiagnosticsForDevice(dev)
 
 	def _runDiagnosticsForDevice(self, device):
+		device = indigo.devices[device.id]
+		props = device.pluginProps
 		name = device.name
-		ip = device.pluginProps.get('ipaddress', '').strip()
+		ip = props.get('ipaddress', '').strip()
 		configured_port = self._getPort(device)
+		method_pref = props.get('method', METHOD_AUTO) or METHOD_AUTO
+
+		def line(n, label, ok, detail):
+			status = 'OK' if ok is True else ('FAILED' if ok is False else str(ok))
+			self.logger.info(f"[{n:<2}] {label:.<44} {status} ({detail})")
 
 		self.logger.info("")
 		self.logger.info("{0:=^100}".format(f" Diagnostics: \"{name}\" "))
@@ -798,80 +1383,132 @@ class Plugin(indigo.PluginBase):
 		# 1. IP address format
 		try:
 			ipaddress_module.ip_address(ip)
-			self.logger.info(f"[1] IP address format........... OK ({ip})")
+			line(1, "IP address format", True, ip)
 		except ValueError:
-			self.logger.info(f"[1] IP address format........... FAILED — \"{ip}\" is not a valid IP address")
+			line(1, "IP address format", False, f"\"{ip}\" is not a valid IP address")
 			self.logger.info("{0:=^100}".format(""))
 			self.logger.error(f"\"{name}\": fix the IP address in this device's config before diagnostics can continue")
 			return
 
-		# 2. TCP reachability on the configured port — bypasses HTTP/TLS/the
-		# Tizen API entirely, isolating "is anything there at all" from
-		# "does the TV's API respond correctly".
-		port_ok, port_detail = self._checkTcpPort(ip, configured_port, timeout=3.0)
-		self.logger.info(f"[2] TCP port {configured_port} reachable......... {'OK' if port_ok else 'FAILED'} ({port_detail})")
+		# 2. Raw TCP reachability of every port any Samsung protocol uses —
+		# bypasses HTTP/TLS/the Tizen API entirely, isolating "is anything
+		# there at all" from "does the TV's API respond correctly".
+		ports = [
+			(WEBSOCKET_SSL_PORT,     "websocket/REST, TLS (2016+)"),
+			(WEBSOCKET_NO_SSL_PORT,  "websocket/REST, plain"),
+			(ENCRYPTED_PORT,         "encrypted remote (2014-15)"),
+			(ENCRYPTED_PAIRING_PORT, "PIN pairing (2014-15)"),
+			(LEGACY_PORT,            "legacy remote (pre-2014)"),
+			(UPNP_PORT,              "UPnP volume/mute"),
+		]
+		open_ports = {}
+		for i, (port, label) in enumerate(ports):
+			ok, detail = self._checkTcpPort(ip, port, timeout=2.0)
+			open_ports[port] = ok
+			line(f"2{chr(ord('a') + i)}", f"TCP {port} — {label}", ok if ok else "closed", detail)
+		any_open = any(open_ports.values())
 
-		# 3. The other common port, as a hint if the Port setting is simply wrong
-		other_port = 8001 if configured_port == 8002 else 8002
-		other_ok, other_detail = self._checkTcpPort(ip, other_port, timeout=3.0)
-		self.logger.info(f"[3] TCP port {other_port} reachable (alt)..... {'OK' if other_ok else 'FAILED'} ({other_detail})")
-
-		# 4. UPnP RenderingControl port — a separate service/port from the
-		# main REST/WebSocket port, so this can be broken independently.
-		upnp_ok, upnp_detail = self._checkTcpPort(ip, UPNP_PORT, timeout=3.0)
-		self.logger.info(f"[4] UPnP port {UPNP_PORT} reachable......... {'OK' if upnp_ok else 'FAILED'} ({upnp_detail})")
-
-		# 5. Token file
-		token_path = self._getTokenPath(device)
-		token_ok = os.path.exists(token_path) and os.access(token_path, os.R_OK | os.W_OK)
-		self.logger.info(f"[5] Token file accessible....... {'OK' if token_ok else 'FAILED'} ({token_path})")
-
-		# 6. MAC address stored (required for Wake-on-LAN)
-		mac = device.pluginProps.get('macaddress', '') or device.states.get('macaddress', '')
-		self.logger.info(f"[6] MAC address stored.......... {'OK (' + mac + ')' if mac else 'MISSING — Wake-on-LAN will not work until a successful poll discovers it'}")
-
-		# 7. The actual Tizen REST API call that polling depends on — only
-		# worth trying if the port is even open.
-		rest_ok = False
-		rest_detail = "skipped — port unreachable"
-		if port_ok:
+		# 3. REST device info — what polling depends on
+		info, rest_port, rest_detail = None, None, "skipped — neither 8001 nor 8002 is open"
+		rest_ports = [p for p in [configured_port, WEBSOCKET_SSL_PORT, WEBSOCKET_NO_SSL_PORT] if open_ports.get(p)]
+		if rest_ports:
 			try:
-				rest = samsungtvws.rest.SamsungTVRest(host=ip, port=configured_port, timeout=3.0)
-				info = rest.rest_device_info()
-				rest_ok = True
-				rest_detail = f"PowerState={info.get('device', {}).get('PowerState', 'unknown')}"
+				rest_port, info = self._probeRest(ip, list(dict.fromkeys(rest_ports)), 3.0)
+				d = info['device']
+				rest_detail = f"port {rest_port}: {d.get('name', '?')}, model {d.get('modelName', '?')}"
 			except Exception as e:
 				rest_detail, _ = self._describeException(e)
-		self.logger.info(f"[7] Tizen REST API (/api/v2/)... {'OK' if rest_ok else 'FAILED'} ({rest_detail})")
+		line(3, "Tizen REST API (/api/v2/)", info is not None if rest_ports else "skipped", rest_detail)
+
+		# 4. Power-state reporting
+		d = (info or {}).get('device', {})
+		if info is not None:
+			ps = d.get('PowerState')
+			line(4, "PowerState reported", True if ps else "n/a",
+				 f"PowerState={ps}" if ps else "not reported by this firmware — on/off is inferred from whether the TV answers")
+
+		# 5. Protocol
+		model = d.get('modelName', '') or props.get('model', '')
+		if info is not None:
+			needs_enc = model_requires_encryption(model)
+			if needs_enc:
+				detected = METHOD_ENCRYPTED if open_ports.get(ENCRYPTED_PORT) else METHOD_WEBSOCKET
+			else:
+				detected = METHOD_WEBSOCKET
+		elif open_ports.get(LEGACY_PORT):
+			detected = METHOD_LEGACY
+		else:
+			detected = None
+		effective = method_pref if method_pref != METHOD_AUTO else (detected or props.get('resolvedMethod') or None)
+		proto_detail = f"using {METHOD_LABELS.get(effective, 'unknown')}" + (" (forced in device config)" if method_pref != METHOD_AUTO else " (auto-detected)")
+		if detected and method_pref != METHOD_AUTO and detected != method_pref:
+			proto_detail += f" — but this TV looks like {METHOD_LABELS[detected]}; consider setting Protocol to Automatic"
+		line(5, "Remote-control protocol", effective is not None if any_open else "unknown", proto_detail)
+
+		# 6. Credentials for that protocol
+		creds_ok = True
+		if effective == METHOD_ENCRYPTED:
+			creds_ok = bool(props.get('encToken') and props.get('encSessionId'))
+			line(6, "PIN pairing", creds_ok, "paired" if creds_ok else "NOT paired — Edit Device → Pair / Authorize → enter PIN → Submit PIN → Save")
+		elif effective == METHOD_WEBSOCKET:
+			token_path = self._getTokenPath(device)
+			readable = os.path.exists(token_path) and os.access(token_path, os.R_OK | os.W_OK)
+			has_token = readable and os.path.getsize(token_path) > 0
+			port_in_use = int(props.get('restPort') or configured_port)
+			if not readable:
+				creds_ok = False
+				line(6, "Token file", False, f"{token_path} missing or not writable")
+			elif port_in_use == WEBSOCKET_SSL_PORT and not has_token:
+				line(6, "Token file", "empty", f"{token_path} — the TV hasn't granted access yet; Edit Device → Pair / Authorize and press Allow on the TV")
+			else:
+				line(6, "Token file", True, token_path)
+		elif effective == METHOD_LEGACY:
+			line(6, "Authorization", "n/a", "legacy TVs remember an allowed remote by name; a prompt appears on first use")
+
+		# 7. MAC address stored (required for Wake-on-LAN)
+		mac = props.get('macaddress', '') or device.states.get('macaddress', '')
+		ag = self._turnOnActionGroup(device)
+		if ag:
+			line(7, "Turn-on method", True, f"action group \"{ag.name}\"" + (f" (MAC {mac} also known)" if mac else ""))
+		else:
+			line(7, "MAC address (Wake-on-LAN)", bool(mac), mac or "MISSING — Wake-on-LAN won't work until the TV is seen on once")
 
 		self.logger.info("{0:=^100}".format(""))
 
 		# Plain-language summary of the most likely cause, based on which
 		# checks passed — so the log doesn't just dump data, it points
 		# somewhere useful.
-		if rest_ok:
-			self.logger.info(f"\"{name}\": diagnostics passed — this TV is fully reachable right now.")
-		elif port_ok:
-			self.logger.error(f"\"{name}\": the TV accepts a connection on port {configured_port}, but the Tizen API call itself failed (see [7] above) — likely a TLS/library issue, not a wrong IP or offline TV.")
-		elif other_ok:
-			self.logger.error(f"\"{name}\": port {configured_port} is closed but port {other_port} answered — try changing the Port setting on this device to {other_port}.")
+		if not any_open:
+			self.logger.warning(f"\"{name}\": nothing answered at {ip}. If the TV is off, that's normal — most Samsung TVs drop off the network in standby. If it's ON, check that its IP ({ip}) matches the TV's own network settings (DHCP may have changed it).")
+		elif info is None and effective != METHOD_LEGACY:
+			self.logger.error(f"\"{name}\": the TV accepts connections but its REST API didn't respond properly (see [3]) — likely a TLS/firmware issue, not a wrong IP.")
+		elif not creds_ok:
+			self.logger.error(f"\"{name}\": reachable, but remote control isn't authorized yet (see [6]).")
 		else:
-			self.logger.error(f"\"{name}\": not reachable on any checked port right now. This points to a network/device issue, not the plugin — check that the TV is powered on, connected to Wi-Fi/Ethernet, and that its IP ({ip}) matches what the TV itself reports in its network settings (it may have changed via DHCP).")
+			self.logger.info(f"\"{name}\": diagnostics passed — reachable and controllable via {METHOD_LABELS.get(effective, effective)}.")
 
 	# ---------------------------------------------------------------------------
-	# Relay / switch built-in action handler
+	# Relay / switch built-in action handlers
 	# ---------------------------------------------------------------------------
 	def actionControlDevice(self, action, dev):
 		if action.deviceAction == indigo.kDeviceAction.TurnOn:
 			self._reportPowerResult(dev, self.turnOnTV(dev), turning_on=True)
 		elif action.deviceAction == indigo.kDeviceAction.TurnOff:
 			self._reportPowerResult(dev, self.turnOffTV(dev), turning_on=False)
+		elif action.deviceAction == indigo.kDeviceAction.Toggle:
+			self.toggleTVPower(None, dev)
+
+	def actionControlUniversal(self, action, dev):
+		if action.deviceAction == indigo.kUniversalAction.RequestStatus:
+			self.logger.info(f"sent \"{dev.name}\" status request")
+			self._backgroundPoll(dev)
 
 	# ---------------------------------------------------------------------------
 	# Power actions
 	# ---------------------------------------------------------------------------
 	def toggleTVPower(self, pluginAction, device):
-		if device.onState:
+		device = indigo.devices[device.id]
+		if device.states.get('status') == "on":
 			self._reportPowerResult(device, self.turnOffTV(device), turning_on=False)
 		else:
 			self._reportPowerResult(device, self.turnOnTV(device), turning_on=True)
@@ -891,12 +1528,18 @@ class Plugin(indigo.PluginBase):
 		verb = "on" if turning_on else "off"
 		if result == "sent":
 			self.logger.info(f"sent \"{device.name}\" {verb}")
-			device.updateStateOnServer("onOffState", turning_on)
-			device.updateStateOnServer("status", "on" if turning_on else "off")
+			# Only "off" is applied optimistically (the power-off grace window
+			# keeps it there). "On" is left to the quick follow-up polls: a TV
+			# takes several seconds to boot after Wake-on-LAN — and may not wake
+			# at all — so claiming "on" immediately would flicker on→off→on.
+			if not turning_on:
+				device.updateStatesOnServer([
+					{'key': 'onOffState', 'value': False},
+					{'key': 'status',     'value': 'off'},
+				])
+				device.updateStateImageOnServer(indigo.kStateImageSel.SensorOff)
 		elif result == "failed":
 			self.logger.error(f"send \"{device.name}\" {verb} failed")
-			if turning_on:
-				self.logger.info(f"Verify the IP address for \"{device.name}\" ({device.pluginProps.get('ipaddress', 'unknown')}) has not changed and remote permissions have been allowed")
 		# "already": turnOnTV()/turnOffTV() already logged an info line — nothing more to do.
 
 	def volumeUpAction(self, pluginAction, device, callerWaitingForResult=None):
@@ -905,102 +1548,184 @@ class Plugin(indigo.PluginBase):
 	def volumeDownAction(self, pluginAction, device, callerWaitingForResult=None):
 		self._volumeDown(device)
 
+	def _wolTargets(self, device):
+		ip = device.pluginProps.get('ipaddress', '').strip()
+		override = device.pluginProps.get('wolBroadcast', '').strip()
+		if override:
+			return [override]
+		targets = ["255.255.255.255"]
+		try:
+			# Directed subnet broadcast too: on a Mac with several interfaces,
+			# 255.255.255.255 only leaves via the default route.
+			targets.append(str(ipaddress_module.ip_network(f"{ip}/24", strict=False).broadcast_address))
+		except ValueError:
+			pass
+		return targets
+
 	def turnOnTV(self, device):
 		"""Returns "sent", "already" (already on — not a failure), or "failed"."""
-		if device.states.get('status') == "on":
+		device = indigo.devices[device.id]
+		entry = self.deviceList.setdefault(device.id, {})
+		status = device.states.get('status')
+		if status == "on" and not self._powerOffInProgress(entry):
 			self.logger.info(f"\"{device.name}\" is already on")
 			return "already"
+		entry.pop('powerOffUntil', None)
+
+		# A user-supplied turn-on (IR blaster, HDMI-CEC from a receiver, a
+		# SmartThings call...) takes precedence over Wake-on-LAN, as in HA.
+		ag = self._turnOnActionGroup(device)
+		if ag:
+			try:
+				indigo.actionGroup.execute(ag.id)
+				self.logger.info(f"\"{device.name}\": ran turn-on action group \"{ag.name}\"")
+				self._schedulePolls(device, [4, 8, 15, 30])
+				return "sent"
+			except Exception as e:
+				self.logger.error(f"\"{device.name}\": turn-on action group \"{ag.name}\" failed: {e} — falling back to Wake-on-LAN")
+
+		sent = False
+		# 2018+ TVs in network standby still listen on the websocket — a
+		# KEY_POWER there wakes them even where Wake-on-LAN is flaky.
+		if status == "standby":
+			try:
+				self._getTransport(device).send_keys(["KEY_POWER"])
+				sent = True
+			except Exception as e:
+				self.logger.debug(f"KEY_POWER to standby TV \"{device.name}\" failed: {e}")
+
 		macaddress = device.pluginProps.get('macaddress', '') or device.states.get('macaddress', '')
-		if not macaddress:
-			self.logger.error(f"\"{device.name}\": no MAC address stored — turn the TV on manually, wait for a poll cycle, then try again")
+		if macaddress:
+			for target in self._wolTargets(device):
+				try:
+					wakeonlan.send_magic_packet(macaddress, ip_address=target)
+					sent = True
+				except Exception as m:
+					self.logger.debug(f"WOL to {target} for \"{device.name}\" failed: {m}")
+			if sent:
+				self.logger.info(f"Sent Wake-on-LAN to {macaddress} for \"{device.name}\"")
+		if not sent:
+			if not macaddress:
+				self.logger.error(f"\"{device.name}\": no MAC address stored — turn the TV on manually once so the plugin can learn it, or set a turn-on action group in the device config")
 			return "failed"
-		self.logger.info(f"Sending WOL magic packet to {macaddress} for \"{device.name}\"")
-		try:
-			wakeonlan.send_magic_packet(macaddress)
-			return "sent"
-		except Exception as m:
-			self.logger.error(f"WOL for \"{device.name}\" failed: {m}")
-			return "failed"
+		self._schedulePolls(device, [4, 8, 15, 30])
+		return "sent"
 
 	def turnOffTV(self, device):
 		"""Returns "sent", "already" (already off — not a failure), or "failed"."""
-		if device.states.get('status') != "on":
+		device = indigo.devices[device.id]
+		entry = self.deviceList.setdefault(device.id, {})
+		if device.states.get('status') not in ("on",) or self._powerOffInProgress(entry):
 			self.logger.info(f"\"{device.name}\" is not on")
 			return "already"
-		self.logger.info(f"Sending power key to \"{device.name}\"")
-		tv = self._getTV(device)
-		if not tv:
-			self.logger.error(f"Power off for \"{device.name}\" failed: cannot connect")
-			return "failed"
+		self.logger.info(f"Sending power off to \"{device.name}\"")
 		try:
-			tv.shortcuts().power()
-			return "sent"
-		except Exception as m:
-			self.logger.error(f"Power off for \"{device.name}\" failed: {m}")
+			transport = self._getTransport(device)
+			transport.power_off(device.pluginProps.get('model', ''))
+		except NeedsPairingError:
+			self._logNeedsPairing(device)
 			return "failed"
+		except Exception as m:
+			self.logger.error(f"Power off for \"{device.name}\" failed: {self._describeException(m)[0]}")
+			self._closeTV(device)
+			return "failed"
+		entry['powerOffUntil'] = time.monotonic() + POWER_OFF_GRACE
+		# Drop the connection so the next command starts fresh.
+		self._closeTV(device)
+		self._schedulePolls(device, [POWER_OFF_GRACE + 2])
+		return "sent"
 
 	# ---------------------------------------------------------------------------
-	# Key send helper — single point for all key dispatch
+	# Key send helper — single point for all key dispatch, any protocol
 	# ---------------------------------------------------------------------------
-	def _sendKey(self, device, key, label="key"):
-		tv = self._getTV(device)
-		if not tv:
-			self.logger.error(f"Cannot reach \"{device.name}\" to send {label}")
+	def _logNeedsPairing(self, device):
+		self.logger.error(
+			f"\"{device.name}\" is a 2014-2015 TV that needs one-time PIN pairing: "
+			"Edit Device → Pair / Authorize → enter the PIN shown on the TV → Submit PIN → Save"
+		)
+
+	def _sendKeys(self, device, keys, label=None, delay=None, repeats=1):
+		label = label or ", ".join(keys)
+		entry = self.deviceList.setdefault(device.id, {})
+		if self._powerOffInProgress(entry):
+			self.logger.debug(f"\"{device.name}\" is powering off — not sending {label}")
 			return False
-		try:
-			tv.send_key(key)
-			return True
-		except Exception as m:
-			# The cached connection may have gone stale (TV rebooted, standby, etc).
-			# Reconnect once and retry before giving up.
-			self.logger.debug(f"{label} failed on \"{device.name}\" ({m}) — reconnecting and retrying")
-			tv = self._getTV(device, forceNew=True)
-			if not tv:
-				self.logger.error(f"Cannot reach \"{device.name}\" to send {label}")
-				return False
+		lock = entry.setdefault('sendLock', threading.Lock())
+		with lock:
 			try:
-				tv.send_key(key)
+				transport = self._getTransport(device)
+				for _ in range(max(1, repeats)):
+					transport.send_keys(keys, delay)
 				return True
-			except Exception as m2:
-				self.logger.error(f"{label} failed on \"{device.name}\": {m2}")
-				return False
+			except NeedsPairingError:
+				self._logNeedsPairing(device)
+			except NotSupportedError as e:
+				self.logger.error(f"\"{device.name}\": {e}")
+			except UnauthorizedError:
+				self.logger.error(
+					f"\"{device.name}\" refused the remote connection. On the TV: Settings → General → External Device Manager → "
+					"Device Connection Manager — allow the remote (or set Access Notification to \"First time only\"), "
+					"then Edit Device → Pair / Authorize."
+				)
+				self._closeTV(device)
+			except Exception as m:
+				detail = self._describeException(m)[0]
+				if self._isNetworkError(m):
+					self.logger.error(f"Cannot reach \"{device.name}\" to send {label} — is it on? ({detail})")
+				else:
+					self.logger.error(f"{label} failed on \"{device.name}\": {detail}")
+				self._closeTV(device)
+		return False
+
+	def _sendKey(self, device, key, label="key"):
+		return self._sendKeys(device, [key], label)
 
 	# ---------------------------------------------------------------------------
 	# sendCommand action — remote button dispatch
 	# ---------------------------------------------------------------------------
+	COMMAND_KEYS = {
+		'play':         "KEY_PLAY",
+		'pause':        "KEY_PAUSE",
+		'stop':         "KEY_STOP",
+		'fast_forward': "KEY_FF",
+		'rewind':       "KEY_REWIND",
+		'channel_up':   "KEY_CHUP",
+		'channel_down': "KEY_CHDOWN",
+		'previous_channel': "KEY_PRECH",
+		'up':           "KEY_UP",
+		'down':         "KEY_DOWN",
+		'left':         "KEY_LEFT",
+		'right':        "KEY_RIGHT",
+		'enter':        "KEY_ENTER",
+		'back':         "KEY_RETURN",
+		'home':         "KEY_HOME",
+		'exit':         "KEY_EXIT",
+		'menu':         "KEY_MENU",
+		'source':       "KEY_SOURCE",
+		'guide':        "KEY_GUIDE",
+		'tools':        "KEY_TOOLS",
+		'info':         "KEY_INFO",
+		'channel_list': "KEY_CH_LIST",
+		'red':          "KEY_RED",
+		'green':        "KEY_GREEN",
+		'yellow':       "KEY_YELLOW",
+		'blue':         "KEY_CYAN",
+	}
+
 	def sendCommand(self, pluginAction, device, callerWaitingForResult=None):
 		cmd = pluginAction.props.get("commandCode", "")
 		self.logger.debug(f"sendCommand '{cmd}' → {device.name}")
 
-		dispatch = {
-			'mute':         self._mute,
-			'volume_up':    self._volumeUp,
-			'volume_down':  self._volumeDown,
-			'play':         self._play,
-			'pause':        self._pause,
-			'stop':         self._stop,
-			'fast_forward': self._fastForward,
-			'rewind':       self._rewind,
-			'channel_up':   self._channelUp,
-			'channel_down': self._channelDown,
-			'up':           self._up,
-			'down':         self._down,
-			'left':         self._left,
-			'right':        self._right,
-			'enter':        self._enter,
-			'back':         self._back,
-			'home':         self._home,
-			'exit':         self._exit,
-			'menu':         self._menu,
-			'source':       self._source,
-			'guide':        self._guide,
-			'tools':        self._tools,
-			'info':         self._info,
+		special = {
+			'mute':        self._mute,
+			'volume_up':   self._volumeUp,
+			'volume_down': self._volumeDown,
+			'play_pause':  self._playPause,
 		}
-
-		fn = dispatch.get(cmd)
-		if fn:
-			fn(device)
+		if cmd in special:
+			special[cmd](device)
+		elif cmd in self.COMMAND_KEYS:
+			self._sendKey(device, self.COMMAND_KEYS[cmd], cmd.replace('_', ' ').title())
 		else:
 			self.logger.error(f"Unknown command code: '{cmd}'")
 
@@ -1016,7 +1741,58 @@ class Plugin(indigo.PluginBase):
 		self._sendKey(device, key, key)
 
 	# ---------------------------------------------------------------------------
-	# setVolume action — steps to an absolute level (0–100)
+	# sendKeySequence action — several keys, with repeats and inter-key delay
+	# (HA's remote.send_command with num_repeats / delay_secs)
+	# ---------------------------------------------------------------------------
+	def sendKeySequence(self, pluginAction, device, callerWaitingForResult=None):
+		raw = pluginAction.props.get("keySequence", "")
+		keys = [k.strip().upper() for k in re.split(r"[,\s]+", raw) if k.strip()]
+		keys = [k if k.startswith("KEY_") else f"KEY_{k}" for k in keys]
+		if not keys:
+			self.logger.error("Send Key Sequence: no keys specified")
+			return
+		try:
+			repeats = max(1, min(50, int(pluginAction.props.get("repeats", 1) or 1)))
+			delay = max(0.0, min(10.0, float(pluginAction.props.get("delay", 0.5) or 0.5)))
+		except ValueError:
+			self.logger.error("Send Key Sequence: repeats must be a whole number and delay a number of seconds")
+			return
+		self.logger.debug(f"Sending {keys} x{repeats} (delay {delay}s) → {device.name}")
+		self._sendKeys(device, keys, "key sequence", delay=delay, repeats=repeats)
+
+	def holdKey(self, pluginAction, device, callerWaitingForResult=None):
+		key = pluginAction.props.get("keyCode", "").strip().upper()
+		if not key:
+			self.logger.error("Hold Key: no key code specified")
+			return
+		try:
+			seconds = max(0.1, min(10.0, float(pluginAction.props.get("seconds", 1) or 1)))
+		except ValueError:
+			self.logger.error("Hold Key: seconds must be a number")
+			return
+		try:
+			self._getTransport(device).hold_key(key, seconds)
+		except Exception as e:
+			self.logger.error(f"Hold {key} failed on \"{device.name}\": {self._describeException(e)[0]}")
+
+	# ---------------------------------------------------------------------------
+	# changeChannel action — digits then Enter (HA's play_media channel)
+	# ---------------------------------------------------------------------------
+	def changeChannel(self, pluginAction, device, callerWaitingForResult=None):
+		channel = pluginAction.props.get("channel", "").strip()
+		if not re.fullmatch(r"\d+([-.]\d+)?", channel):
+			self.logger.error(f"Change Channel: \"{channel}\" isn't a channel number (e.g. 7 or 7-1)")
+			return
+		keys = []
+		for ch in channel:
+			# KEY_PLUS100 is the "-" key used for digital sub-channels (7-1).
+			keys.append("KEY_PLUS100" if ch in "-." else f"KEY_{ch}")
+		keys.append("KEY_ENTER")
+		self.logger.info(f"Changing \"{device.name}\" to channel {channel}")
+		self._sendKeys(device, keys, f"channel {channel}", delay=0.3)
+
+	# ---------------------------------------------------------------------------
+	# setVolume action — absolute level (0–100)
 	# ---------------------------------------------------------------------------
 	def setVolume(self, pluginAction, device, callerWaitingForResult=None):
 		try:
@@ -1043,23 +1819,31 @@ class Plugin(indigo.PluginBase):
 		if diff == 0:
 			return
 
-		tv = self._getTV(device)
-		if not tv:
-			return
-
 		self.logger.debug(f"UPnP volume control unavailable — stepping {current} → {target} ({diff:+d}) via remote keys on \"{device.name}\"")
-		try:
-			key  = "KEY_VOLUP" if diff > 0 else "KEY_VOLDOWN"
-			# samsungtvws defaults to a 1-second pause after every send_key() —
-			# fine for a single button press, but this loop can run up to 100
-			# times (a full 0-100 jump), so left at the default it would block
-			# this action for up to ~100 seconds. 100ms is still comfortably
-			# enough for the TV to register each discrete step.
-			for _ in range(abs(diff)):
-				tv.send_key(key, key_press_delay=0.1)
+		key = "KEY_VOLUP" if diff > 0 else "KEY_VOLDOWN"
+		# 100ms per step is still comfortably enough for the TV to register
+		# each one; the library default of 1 s would make a 0→100 jump take
+		# over a minute and a half.
+		if self._sendKeys(device, [key] * abs(diff), "set volume", delay=0.1):
 			device.updateStateOnServer("volumeLevel", target)
-		except Exception as m:
-			self.logger.error(f"setVolume failed on \"{device.name}\": {m}")
+
+	def setMute(self, pluginAction, device, callerWaitingForResult=None):
+		mode = pluginAction.props.get("muteMode", "toggle")
+		ip = device.pluginProps.get('ipaddress', '')
+		current = self._getMuteUPnP(ip)
+		if mode == "toggle":
+			desired = not (current if current is not None else device.states.get("isMuted", False))
+		else:
+			desired = mode == "on"
+		# Explicit on/off via UPnP is idempotent — better than a blind
+		# KEY_MUTE toggle, which flips the wrong way if the state was stale.
+		if self._setMuteUPnP(ip, desired):
+			device.updateStateOnServer("isMuted", desired)
+			return
+		if current is not None and current == desired:
+			return
+		if self._sendKey(device, "KEY_MUTE", "Mute"):
+			device.updateStateOnServer("isMuted", desired)
 
 	# ---------------------------------------------------------------------------
 	# selectSource action — switch input via Samsung key code
@@ -1080,27 +1864,77 @@ class Plugin(indigo.PluginBase):
 		return [(name, name) for name in SOURCE_MAP.keys()]
 
 	# ---------------------------------------------------------------------------
-	# launchApp action — open an app by name via the Samsung REST API
+	# launchApp action — open an app on 2016+ TVs
 	# ---------------------------------------------------------------------------
+	def _resolveApp(self, device, props):
+		app_name = props.get("appName", "")
+		if app_name == CUSTOM_APP:
+			app_id = props.get("appId", "").strip()
+			return app_id, app_id, "DEEP_LINK"
+		installed = self._installedApps(device)
+		if app_name in installed:
+			app_id, app_type = installed[app_name]
+			return app_name, app_id, app_type
+		if app_name in COMMON_APPS:
+			return app_name, COMMON_APPS[app_name], "DEEP_LINK"
+		return app_name, None, None
+
 	def launchApp(self, pluginAction, device, callerWaitingForResult=None):
-		app_name = pluginAction.props.get("appName", "")
-		app_id = COMMON_APPS.get(app_name)
+		device = indigo.devices[device.id]
+		app_name, app_id, app_type = self._resolveApp(device, pluginAction.props)
 		if not app_id:
 			self.logger.error(f"launchApp: unknown app '{app_name}'")
 			return
 		self.logger.info(f"Launching {app_name} on \"{device.name}\"")
-		tv = self._getTV(device)
-		if not tv:
+		try:
+			tv = self._getTV(device)
+		except Exception as e:
+			self.logger.error(f"Can't launch {app_name} on \"{device.name}\": {self._describeException(e)[0]}")
 			return
 		try:
-			tv.rest_app_run(app_id)
-			device.updateStateOnServer("currentApp", app_name)
-		except Exception as m:
-			self.logger.error(f"Failed to launch {app_name} on \"{device.name}\": {m}")
+			tv.launch_app(app_id, app_type)
+		except Exception as ws_err:
+			# Some firmware ignores the websocket launch; the REST endpoint
+			# is the older fallback.
+			self.logger.debug(f"websocket launch of {app_id} failed ({ws_err!r}) — trying REST")
+			try:
+				port = int(device.pluginProps.get('restPort') or self._getPort(device))
+				samsungtvws.rest.SamsungTVRest(host=tv.host, port=port, timeout=self.timeout).rest_app_run(app_id)
+			except Exception as m:
+				self.logger.error(f"Failed to launch {app_name} on \"{device.name}\": {self._describeException(m)[0]}")
+				return
+		device.updateStateOnServer("currentApp", app_name)
+		device.updateStateOnServer("currentSource", "Smart Hub")
 
 	def getAppList(self, filter="", valuesDict=None, typeId="", targetId=0):
-		"""Dynamic list callback for the launchApp action ConfigUI."""
-		return [(name, name) for name in COMMON_APPS.keys()]
+		"""Dynamic list callback for the launchApp action ConfigUI: the TV's
+		own installed apps (when known) plus the built-in list."""
+		names = []
+		if targetId and targetId in indigo.devices:
+			names = sorted(self._installedApps(indigo.devices[targetId]).keys(), key=str.lower)
+		names += [n for n in COMMON_APPS if n not in names]
+		return [(n, n) for n in names] + [(CUSTOM_APP, "Other (enter an app ID)…")]
+
+	def openBrowser(self, pluginAction, device, callerWaitingForResult=None):
+		url = pluginAction.props.get("url", "").strip()
+		if not url:
+			self.logger.error("Open URL: no URL specified")
+			return
+		try:
+			self._getTV(device).open_browser(url)
+			self.logger.info(f"Opened {url} on \"{device.name}\"")
+		except Exception as e:
+			self.logger.error(f"Open URL failed on \"{device.name}\": {self._describeException(e)[0]}")
+
+	def sendText(self, pluginAction, device, callerWaitingForResult=None):
+		text = pluginAction.props.get("text", "")
+		if not text:
+			self.logger.error("Send Text: no text specified")
+			return
+		try:
+			self._getTV(device).send_text(text)
+		except Exception as e:
+			self.logger.error(f"Send Text failed on \"{device.name}\" (a text field must be focused on the TV): {self._describeException(e)[0]}")
 
 	# ---------------------------------------------------------------------------
 	# Individual key methods (called by sendCommand dispatch)
@@ -1117,31 +1951,20 @@ class Plugin(indigo.PluginBase):
 
 	def _volumeUp(self, device):
 		if self._sendKey(device, "KEY_VOLUP", "Volume Up"):
-			current = device.states.get("volumeLevel", 50)
-			device.updateStateOnServer("volumeLevel", min(100, int(current) + 1))
+			volume, _ = self._refreshVolumeMute(device)
+			if volume is None:
+				current = device.states.get("volumeLevel", 50)
+				device.updateStateOnServer("volumeLevel", min(100, int(current) + 1))
 
 	def _volumeDown(self, device):
 		if self._sendKey(device, "KEY_VOLDOWN", "Volume Down"):
-			current = device.states.get("volumeLevel", 50)
-			device.updateStateOnServer("volumeLevel", max(0, int(current) - 1))
+			volume, _ = self._refreshVolumeMute(device)
+			if volume is None:
+				current = device.states.get("volumeLevel", 50)
+				device.updateStateOnServer("volumeLevel", max(0, int(current) - 1))
 
-	def _play(self, device):         self._sendKey(device, "KEY_PLAY",      "Play")
-	def _pause(self, device):        self._sendKey(device, "KEY_PAUSE",     "Pause")
-	def _stop(self, device):         self._sendKey(device, "KEY_STOP",      "Stop")
-	def _fastForward(self, device):  self._sendKey(device, "KEY_FF",        "Fast Forward")
-	def _rewind(self, device):       self._sendKey(device, "KEY_REWIND",    "Rewind")
-	def _channelUp(self, device):    self._sendKey(device, "KEY_CHUP",      "Channel Up")
-	def _channelDown(self, device):  self._sendKey(device, "KEY_CHDOWN",    "Channel Down")
-	def _up(self, device):           self._sendKey(device, "KEY_UP",        "Up")
-	def _down(self, device):         self._sendKey(device, "KEY_DOWN",      "Down")
-	def _left(self, device):         self._sendKey(device, "KEY_LEFT",      "Left")
-	def _right(self, device):        self._sendKey(device, "KEY_RIGHT",     "Right")
-	def _enter(self, device):        self._sendKey(device, "KEY_ENTER",     "Enter")
-	def _back(self, device):         self._sendKey(device, "KEY_RETURN",    "Back")
-	def _home(self, device):         self._sendKey(device, "KEY_HOME",      "Home")
-	def _exit(self, device):         self._sendKey(device, "KEY_EXIT",      "Exit")
-	def _menu(self, device):         self._sendKey(device, "KEY_MENU",      "Menu")
-	def _source(self, device):       self._sendKey(device, "KEY_SOURCE",    "Source")
-	def _guide(self, device):        self._sendKey(device, "KEY_GUIDE",     "Guide")
-	def _tools(self, device):        self._sendKey(device, "KEY_TOOLS",     "Tools")
-	def _info(self, device):         self._sendKey(device, "KEY_INFO",      "Info")
+	def _playPause(self, device):
+		entry = self.deviceList.setdefault(device.id, {})
+		playing = entry.get('playing', False)
+		if self._sendKey(device, "KEY_PAUSE" if playing else "KEY_PLAY", "Play/Pause"):
+			entry['playing'] = not playing

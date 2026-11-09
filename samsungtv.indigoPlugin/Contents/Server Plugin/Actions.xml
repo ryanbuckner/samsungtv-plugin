@@ -35,7 +35,8 @@
 			<Field id="commandCode" type="menu">
 				<Label>Command:</Label>
 				<List>
-					<Option value="mute">Mute</Option>
+					<Option value="play_pause">Play / Pause (toggle)</Option>
+					<Option value="mute">Mute (toggle)</Option>
 					<Option value="volume_up">Volume Up</Option>
 					<Option value="volume_down">Volume Down</Option>
 					<Option value="play">Play</Option>
@@ -45,6 +46,8 @@
 					<Option value="rewind">Rewind</Option>
 					<Option value="channel_up">Channel Up</Option>
 					<Option value="channel_down">Channel Down</Option>
+					<Option value="previous_channel">Previous Channel</Option>
+					<Option value="channel_list">Channel List</Option>
 					<Option value="up">Up</Option>
 					<Option value="down">Down</Option>
 					<Option value="left">Left</Option>
@@ -58,6 +61,10 @@
 					<Option value="guide">Guide</Option>
 					<Option value="tools">Tools</Option>
 					<Option value="info">Info</Option>
+					<Option value="red">Red</Option>
+					<Option value="green">Green</Option>
+					<Option value="yellow">Yellow</Option>
+					<Option value="blue">Blue</Option>
 				</List>
 			</Field>
 		</ConfigUI>
@@ -113,7 +120,104 @@
 				<Label>App:</Label>
 				<List class="self" method="getAppList" dynamicReload="true"/>
 			</Field>
+			<Field id="appId" type="textfield" defaultValue="" visibleBindingId="appName" visibleBindingValue="__custom__">
+				<Label>App ID:</Label>
+				<Description>e.g. 3201907018807 — run "Refresh Installed Apps" to load the TV's own app list into the menu above.</Description>
+			</Field>
+			<Field id="appNote" type="label" fontSize="small" fontColor="darkgray">
+				<Label>2016+ TVs only.</Label>
+			</Field>
 		</ConfigUI>
+	</Action>
+
+	<Action id="sep1"/>
+
+	<Action id="sendKeySequence" deviceFilter="self.televisions">
+		<Name>Send Key Sequence</Name>
+		<CallbackMethod>sendKeySequence</CallbackMethod>
+		<ConfigUI>
+			<Field id="keySequence" type="textfield">
+				<Label>Keys:</Label>
+				<Description>Comma- or space-separated, e.g. KEY_HOME, KEY_RIGHT, KEY_ENTER (the KEY_ prefix is optional)</Description>
+			</Field>
+			<Field id="repeats" type="textfield" defaultValue="1">
+				<Label>Repeat:</Label>
+			</Field>
+			<Field id="delay" type="textfield" defaultValue="0.5">
+				<Label>Delay between keys (seconds):</Label>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="holdKey" deviceFilter="self.televisions">
+		<Name>Press and Hold Key</Name>
+		<CallbackMethod>holdKey</CallbackMethod>
+		<ConfigUI>
+			<Field id="keyCode" type="textfield" defaultValue="KEY_POWER">
+				<Label>Key Code:</Label>
+			</Field>
+			<Field id="seconds" type="textfield" defaultValue="3">
+				<Label>Hold for (seconds):</Label>
+			</Field>
+			<Field id="holdNote" type="label" fontSize="small" fontColor="darkgray">
+				<Label>2016+ TVs only.</Label>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="changeChannel" deviceFilter="self.televisions">
+		<Name>Change Channel</Name>
+		<CallbackMethod>changeChannel</CallbackMethod>
+		<ConfigUI>
+			<Field id="channel" type="textfield">
+				<Label>Channel:</Label>
+				<Description>e.g. 7, 704, or 7-1 for a digital sub-channel</Description>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="setMute" deviceFilter="self.televisions">
+		<Name>Set Mute</Name>
+		<CallbackMethod>setMute</CallbackMethod>
+		<ConfigUI>
+			<Field id="muteMode" type="menu" defaultValue="on">
+				<Label>Mute:</Label>
+				<List>
+					<Option value="on">On</Option>
+					<Option value="off">Off</Option>
+					<Option value="toggle">Toggle</Option>
+				</List>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="openBrowser" deviceFilter="self.televisions">
+		<Name>Open URL in TV Browser</Name>
+		<CallbackMethod>openBrowser</CallbackMethod>
+		<ConfigUI>
+			<Field id="url" type="textfield">
+				<Label>URL:</Label>
+			</Field>
+			<Field id="urlNote" type="label" fontSize="small" fontColor="darkgray">
+				<Label>2016+ TVs only.</Label>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="sendText" deviceFilter="self.televisions">
+		<Name>Send Text</Name>
+		<CallbackMethod>sendText</CallbackMethod>
+		<ConfigUI>
+			<Field id="text" type="textfield">
+				<Label>Text:</Label>
+				<Description>Typed into the text field that is focused on the TV (search boxes, etc.). 2016+ TVs only.</Description>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="refreshAppList" deviceFilter="self.televisions">
+		<Name>Refresh Installed Apps</Name>
+		<CallbackMethod>refreshAppListAction</CallbackMethod>
 	</Action>
 
 </Actions>

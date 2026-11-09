@@ -9,56 +9,49 @@
 
 # Samsung TV Plugin for Indigo Domotics Home Automation
 
-This Indigo Plugin connects [Indigo Domotics](http://www.indigodomo.com) to Samsung Smart TVs running Tizen OS (2015 models and later) via the WebSocket / REST API. No SmartThings account or cloud dependency required.
+Control your Samsung Smart TVs from [Indigo](http://www.indigodomo.com): turn them on and off, change volume, inputs, channels and apps, and use the TV's state in triggers, schedules and Control Pages.
+
+It works with Samsung Smart TVs from **2013 and earlier through today's models**, entirely on your home network. No SmartThings account or cloud service needed.
 
 This plugin is not endorsed by or affiliated with Samsung.
 
 ---
 
-### What's New
+### What's New in 2026.1.0
 
-A reliability-focused update, with a few small usability improvements:
-
-- **Faster, smoother polling.** Checking what app is on-screen used to take a noticeable moment, especially with a slower TV — it now reports back almost instantly in the common case. If you don't need app detection at all, a new **Detect Running App** switch in the device setup lets you turn it off for the fastest polling possible.
-- **Volume and mute are now exact.** Setting a volume level lands on the exact number you asked for, and the Mute status shown in Indigo now matches what the TV is actually doing, instead of an occasional best guess.
-- **No more false error messages.** Turning on a TV that's already on (or off when it's already off) used to log a scary-looking error — it's now correctly treated as "nothing to do."
-- **Quicker, more responsive remote control.** Buttons on the remote respond faster and more reliably, especially when pressed in quick succession.
-- **Easier, safer setup.** The token filename is now optional — leave it blank and the plugin generates a unique one automatically, so two TVs set up with default settings can no longer accidentally interfere with each other. The IP address and port you enter are also checked for obvious typos before they're saved.
-- **A friendlier startup.** Indigo now starts up promptly even if a TV is temporarily offline or slow to respond on the network.
+- **Older TVs now work.** 2014–2015 TVs (model numbers with an **H** or **J**, like UN48**J**U6400) and pre-2014 TVs can now be added. Some 2016–2017 TVs that used to show as permanently "unreachable" now work too.
+- **Easier setup.** Click **Detect TV**, then **Pair / Authorize**, in the device settings. The plugin works out the rest.
+- **"Off" is just off.** A TV that's turned off shows as *off* instead of with a red error badge.
+- **More ways to turn a TV on.** If your TV doesn't wake up over the network, have Indigo run any action group instead (an IR blaster, your AV receiver, an Apple TV or Roku over HDMI‑CEC…).
+- **Faster updates.** After you turn a TV on or off, Indigo shows the new state within seconds.
+- **New actions:** Change Channel, Send Key Sequence, Press and Hold Key, Set Mute (on/off), Open URL in TV Browser, Send Text, Refresh Installed Apps.
+- **Launch App** now lists the apps actually installed on your TV.
+- **Frame TVs** now turn off completely instead of going into Art Mode.
+- **Discovery** finds more TVs on your network.
 
 ---
 
-### Features
+### What You Can Do
 
-**Power**
-- On / Off / Toggle via Wake-on-LAN and the TV WebSocket API
-- Polled power state monitoring with configurable refresh interval
+- **Power:** turn on, turn off, toggle. Works with Indigo's standard On/Off buttons and Control Pages.
+- **Volume:** up, down, set an exact level, mute on/off.
+- **Inputs:** switch to TV, HDMI 1–4, AV or Component.
+- **Channels:** go straight to a channel number (`7`, `704`, or `7-1`), channel up/down, previous channel.
+- **Apps:** launch Netflix, YouTube, Plex or any app installed on the TV, and see which app is on screen.
+- **Remote buttons:** every button on the Samsung remote (arrows, Enter, Back, Home, Menu, Guide, Info, color buttons, playback controls…), single presses or whole sequences.
+- **Automation:** use the TV's state in triggers, for example "when the Living Room TV turns on, dim the lights", or "when Netflix starts, close the shades".
 
-**Volume**
-- Volume Up / Down / Mute
-- Increase or decrease volume by 1 step
-- Set Volume to an absolute level (0–100)
-- Volume level read from the TV via UPnP on each poll
+#### What works on your TV
 
-**Navigation**
-- Full D-pad: Up, Down, Left, Right, Enter, Back, Home, Exit
-- Menu, Source, Guide, Tools, Info
+| | 2016 and newer | 2014–2015 (H / J models) | 2013 and older |
+|---|:-:|:-:|:-:|
+| On/off status, volume and mute level | ✅ | ✅ | ✅ (status) |
+| Turn on / off | ✅ | ✅ | ✅ |
+| Volume, mute, remote buttons, channels, inputs | ✅ | ✅ after PIN pairing | ✅ |
+| Launch apps / see the current app | ✅ | — | — |
+| Send Text, Open URL, Press and Hold | ✅ | — | — |
 
-**Media Playback**
-- Play, Pause, Stop, Fast Forward, Rewind
-- Channel Up / Channel Down
-
-**Source / Input Tracking**
-- Switch inputs (TV, HDMI 1–4, AV, Component) from an action dropdown
-- `currentSource` shows the active input; automatically set to **Smart Hub** when an app is running
-
-**App Launching & Tracking**
-- Launch any app from a dropdown (Netflix, YouTube TV, YouTube, Prime Video, Disney+, and more)
-- Polls for the currently active foreground app and updates the `currentApp` device state
-- Foreground detection takes priority over background/cached apps — e.g. Netflix correctly wins over YouTube running in the background
-
-**Send Key Code**
-- Send any raw Samsung key code directly (e.g. `KEY_RED`, `KEY_ASPECT`, `KEY_0`)
+Not sure what year your TV is? The plugin tells you when you click **Detect TV**.
 
 ---
 
@@ -66,162 +59,126 @@ A reliability-focused update, with a few small usability improvements:
 
 Download `SamsungTV.indigoPlugin` and double-click it to install.
 
-#### Plugin Config
-- Set the poll interval (default 30 seconds, minimum 10)
-- Set the **Debug Logging** level:
-  - **Critical** — only errors are logged (default)
-  - **Debug** — connection and command details
-  - **Detailed State Logging** — dumps every device state value on each poll cycle
+### Adding a TV
 
-#### Device Config
-1. Create a new device, type **Samsung TV**
-2. Enter the IP address of the TV
-3. Port defaults to `8002` — change only if needed
-4. Token filename is optional — leave it blank to auto-generate one from the IP address, or enter your own (e.g. `living-room-tv.txt`)
-5. **Detect Running App** is on by default — uncheck it for faster, leaner polling if you don't need Netflix/YouTube/etc detection
+1. **Turn the TV on.**
+2. In Indigo, create a new device. Choose **SamsungTV** → **Samsung TV**.
+3. Enter the TV's **IP address**. You'll find it on the TV under Settings → General → Network → Network Status. Better still, give it a fixed address in your router so it never changes.
+4. Click **Detect TV**. You should see your TV's name and model.
+5. Click **Pair / Authorize**:
+   - **Most TVs:** a prompt appears on the TV. Press **Allow** with the TV remote within 30 seconds. The Indigo event log confirms when it worked.
+   - **2014–2015 TVs:** a PIN appears on the TV. Type it into the **PIN** box and click **Submit PIN**.
+6. Click **Save**.
 
-> The TV must be powered on the first time you add it so the plugin can obtain a WebSocket token and discover the MAC address for Wake-on-LAN.
+That's it. The TV's status shows in Indigo within a few seconds.
 
-> Developer mode is required on the TV. Authorize the IP address of your Indigo server when prompted on-screen. See [Samsung's official instructions for enabling Developer Mode](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/tv-device.html).
+> **The TV never asked me to Allow, or said no?** On the TV, open **Settings → General → External Device Manager → Device Connection Manager**. Allow the Indigo entry (or delete it and pair again). Setting **Access Notification** to *First time only* stops repeat prompts.
+
+#### Optional device settings
+
+- **Turn On using:** how Indigo turns the TV on. The default, **Wake-on-LAN**, wakes the TV over the network. Many older TVs, especially on Wi‑Fi, can't be woken that way. For those, pick an action group that turns the TV on another way:
+  - an IR blaster sending the TV's power code;
+  - turning on an Apple TV, Roku or AV receiver connected by HDMI. With HDMI‑CEC ("Anynet+" on Samsung) enabled, that wakes the TV.
+- **Detect Running App:** on by default. Turn it off if you don't need the *current app* state.
+- **Show advanced settings:** only needed if something unusual is going on (see Troubleshooting).
+
+#### Plugin settings (Plugins → SamsungTV → Configure…)
+
+- **Refresh frequency:** how often Indigo checks each TV (default 30 seconds).
+- **Debug Logging:** leave on *Critical* unless you're troubleshooting.
 
 ---
 
-### Actions
+### Using the TV in Indigo
 
-| Action | Description |
+#### Buttons and Control Pages
+The TV works like any on/off device. The standard **Turn On**, **Turn Off** and **Toggle** buttons work in the Indigo client, on Control Pages, and anywhere else Indigo controls devices.
+
+#### Actions
+Add these to Action Groups, Triggers and Schedules (choose **SamsungTV** as the action type):
+
+| Action | What it does |
 |--------|-------------|
-| Turn On | Send Wake-on-LAN magic packet |
-| Turn Off | Send power key via WebSocket |
-| Toggle TV On/Off | WOL on, WebSocket power key off |
-| Refresh Data | Force an immediate state poll |
-| Increase Volume (+1) | Step volume up by one |
-| Decrease Volume (-1) | Step volume down by one |
-| Set Volume | Set an absolute volume level 0–100 |
-| Send Remote Command | Pick a button from a dropdown (volume, nav, media, etc.) |
-| Send Key Code | Type any `KEY_xxx` code directly |
-| Select Source / Input | Switch to TV, HDMI 1–4, AV, or Component |
-| Launch App | Launch an app from a dropdown |
+| Turn On / Turn Off / Toggle TV On/Off | Power control |
+| Set Volume | Jump to an exact volume, 0–100 |
+| Increase / Decrease Volume | One step up or down |
+| Set Mute | Mute on, off, or toggle |
+| Select Source / Input | TV, HDMI 1–4, AV, Component |
+| Change Channel | Go to a channel number, e.g. `7`, `704`, `7-1` |
+| Launch App | Open an app installed on the TV (or enter an app ID) |
+| Send Remote Command | Press one remote button, picked from a list |
+| Send Key Sequence | Press several buttons in a row, e.g. `HOME, RIGHT, RIGHT, ENTER`, with repeats and a pause between presses |
+| Press and Hold Key | Hold a button down for a few seconds |
+| Send Key Code | Press any button by its Samsung code, e.g. `KEY_RED` |
+| Send Text | Type into a search box on the TV |
+| Open URL in TV Browser | Open a web page on the TV |
+| Refresh Installed Apps | Reload the app list after installing new apps on the TV |
+| Refresh Data | Check the TV's status right now |
+| Run Diagnostics | Check the connection to this TV and explain any problem in the event log |
 
----
+#### Device states (for triggers and Control Pages)
 
-### Plugins Menu
+| State | Example values |
+|-------|----------------|
+| Power Status | `on`, `standby`, `off` |
+| Volume Level | `0`–`100` |
+| Is Muted | true / false |
+| Current App | `Netflix`, `YouTube`, … |
+| Current Source | `HDMI 1`, `TV`, `Smart Hub` (an app is running) |
+| Model | `QN65Q80T`, `UN48JU6400`, … |
 
-| Menu Item | Description |
+**Example trigger:** *Device State Changed → Living Room TV → Current App → becomes equal to → Netflix* → run your "Movie Mode" action group.
+
+#### Plugins menu
+
+| Menu Item | What it does |
 |-----------|-------------|
-| Toggle Debug | Toggle debug logging on/off |
-| Toggle Detailed State Logging | Toggle detailed state logging; immediately polls all TVs so output appears right away |
-| List Configured Device Info | Dump name, IP, MAC, and OS for all configured TVs to the log |
-| Discover Samsung TVs on Network | ⚠️ Experimental — scan the network for Samsung TVs via SSDP |
+| Discover Samsung TVs on Network | Finds Samsung TVs that are turned on and lists their IP addresses in the event log (takes about 20 seconds) |
+| Run Diagnostics on All TVs | Checks every configured TV and explains any problem in the event log |
+| List Configured Device Info | Lists each TV's IP, model and MAC address in the event log |
+| Toggle Debug / Toggle Detailed State Logging | Extra logging for troubleshooting |
 
 ---
 
-### TV Discovery (Experimental)
+### Scripting
 
-> ⚠️ **Experimental feature.** Discovery works on most networks but results are not guaranteed. Use it as a helper to find IP addresses — always verify before adding a device.
-
-**Plugins → Samsung TV → Discover Samsung TVs on Network** sends an SSDP multicast across the local network to find Samsung TVs and logs their IP address, name, model, OS, and MAC. It also flags which TVs are already configured in Indigo.
-
-**Requirements for discovery to work:**
-- **The TV must be powered fully on.** Standby mode disables SSDP broadcasts on most Samsung models.
-- The TV and the Indigo server must be on the **same network segment**. Discovery does not cross router boundaries or VLANs.
-- Allow approximately 6 seconds for the scan to complete.
-
-Discovery does not add devices automatically — use the found IP address to manually create a new Samsung TV device in Indigo.
-
----
-
-### Plugin Scripting
-
-You can control Samsung TVs from Indigo's built-in scripting shell (**Plugins → Open Scripting Shell**) or from any Indigo Python script/schedule.
-
-#### Get a reference to the plugin and a TV device
+You can also control TVs from Indigo Python scripts:
 
 ```python
 plugin = indigo.server.getPlugin("com.ryanbuckner.indigoplugin.samsungtv")
-tv     = indigo.devices["Living Room TV"]   # use your device name
+tv     = indigo.devices["Living Room TV"]   # your device name
+
+# Power
+indigo.device.turnOn(tv.id)
+indigo.device.turnOff(tv.id)
+
+# Volume and mute
+plugin.executeAction("setVolume", deviceId=tv.id, props={"volumeLevel": "20"})
+plugin.executeAction("setMute",   deviceId=tv.id, props={"muteMode": "on"})   # on / off / toggle
+
+# Inputs, channels and apps
+plugin.executeAction("selectSource",  deviceId=tv.id, props={"sourceId": "HDMI 1"})
+plugin.executeAction("changeChannel", deviceId=tv.id, props={"channel": "7-1"})
+plugin.executeAction("launchApp",     deviceId=tv.id, props={"appName": "Netflix"})
+
+# Remote buttons
+plugin.executeAction("sendCommand",     deviceId=tv.id, props={"commandCode": "home"})
+plugin.executeAction("sendKeySequence", deviceId=tv.id,
+                     props={"keySequence": "HOME, RIGHT, RIGHT, ENTER", "repeats": "1", "delay": "0.5"})
+
+# Read the TV's state
+print(tv.onState, tv.states["status"], tv.states["volumeLevel"], tv.states["currentApp"])
 ```
 
-#### Read device states
-
-```python
-print(tv.onState)                    # True / False
-print(tv.states["volumeLevel"])      # 0–100
-print(tv.states["currentApp"])       # e.g. "Netflix"
-print(tv.states["currentSource"])    # e.g. "HDMI 1" or "Smart Hub"
-print(tv.states["macaddress"])
-print(tv.states["model"])
-```
-
-#### Power on / off
-
-```python
-# Turn on (Wake-on-LAN)
-plugin.executeAction("turnOnTV", deviceId=tv.id)
-
-# Turn off
-plugin.executeAction("turnOffTV", deviceId=tv.id)
-
-# Toggle
-plugin.executeAction("toggleTVPower", deviceId=tv.id)
-```
-
-#### Volume
-
-```python
-# Step up or down by 1
-plugin.executeAction("volumeUp",   deviceId=tv.id)
-plugin.executeAction("volumeDown", deviceId=tv.id)
-
-# Set an absolute level (0–100)
-plugin.executeAction("setVolume", deviceId=tv.id,
-                     props={"volumeLevel": "25"})
-```
-
-#### Send a remote button
-
-```python
-# Pick any value from the sendCommand action dropdown
-plugin.executeAction("sendCommand", deviceId=tv.id,
-                     props={"commandCode": "mute"})
-
-# Or send any Samsung key code directly
-plugin.executeAction("sendKeyCode", deviceId=tv.id,
-                     props={"keyCode": "KEY_RED"})
-```
-
-#### Switch input source
-
-```python
-plugin.executeAction("selectSource", deviceId=tv.id,
-                     props={"sourceId": "HDMI 1"})
-# Valid values: "TV", "HDMI 1", "HDMI 2", "HDMI 3", "HDMI 4", "AV", "Component"
-```
-
-#### Launch an app
-
-```python
-plugin.executeAction("launchApp", deviceId=tv.id,
-                     props={"appName": "Netflix"})
-# Valid values: Netflix, YouTube TV, YouTube, Prime Video, Disney+,
-#               Hulu, Spotify, Plex, Apple TV, HBO Max, Peacock,
-#               Paramount+, ESPN, Tubi, Crunchyroll, TV Plus, Samsung Internet
-```
-
-#### Force a state refresh
-
-```python
-plugin.executeAction("refresh_tv_data", deviceId=tv.id)
-```
-
-#### Example: movie-night scene
+**Example: movie night**
 
 ```python
 plugin = indigo.server.getPlugin("com.ryanbuckner.indigoplugin.samsungtv")
 tv     = indigo.devices["Living Room TV"]
 
 if not tv.onState:
-    plugin.executeAction("turnOnTV", deviceId=tv.id)
-    indigo.server.sleep(8)              # wait for TV to boot
+    indigo.device.turnOn(tv.id)
+    indigo.server.sleep(10)          # give the TV time to start up
 
 plugin.executeAction("selectSource", deviceId=tv.id, props={"sourceId": "HDMI 1"})
 plugin.executeAction("setVolume",    deviceId=tv.id, props={"volumeLevel": "20"})
@@ -231,10 +188,15 @@ plugin.executeAction("setVolume",    deviceId=tv.id, props={"volumeLevel": "20"}
 
 ### Troubleshooting
 
-- The plugin polls over the local network. The TV must be reachable from the Indigo server.
-- When a TV is unreachable it shows a red error badge in the Indigo device list and clears it when connectivity is restored.
-- If a power-on command fails, verify the IP address has not changed and that remote permissions have been allowed on the TV.
-- Wake-on-LAN requires the MAC address to be stored. Turn the TV on at least once after adding it so the plugin can auto-discover and persist the MAC address.
-- Adjust the **Debug Logging** level in **Plugins → Samsung TV → Plugin Configuration** to see more detail in the Indigo log. **Detailed State Logging** dumps every device state on each poll and triggers an immediate refresh when enabled.
+**Start with Plugins → SamsungTV → Run Diagnostics on All TVs.** It checks each TV and writes a plain-English explanation of any problem to the event log.
+
+- **The TV shows "off" but it's on.** The TV's IP address has probably changed. Check it on the TV (Settings → General → Network → Network Status), update the device, and consider reserving the address in your router.
+- **The TV shows a red "no response" badge.** Indigo has never been able to reach the TV. Usually the IP address is wrong, or the TV was off when you added it. Turn the TV on and click **Detect TV** again.
+- **Status works but buttons don't.** The TV hasn't been paired. Edit the device, click **Pair / Authorize**, and accept the prompt (or enter the PIN) on the TV.
+- **Turn On doesn't work.** Many TVs, especially 2015 and older on Wi‑Fi, can't be woken over the network. Set **Turn On using** to an action group that turns the TV on another way (see *Optional device settings*). On newer TVs, also check that **Settings → General → Network → Expert Settings → Power On with Mobile** is enabled.
+- **The TV keeps asking to Allow.** On the TV, set **Device Connection Manager → Access Notification** to *First time only*.
+- **Discovery doesn't find my TV.** The TV must be fully on and on the same network as the Indigo server. You can always add a TV by its IP address instead.
+
+Still stuck? Set **Debug Logging** to *Debug* in the plugin settings, reproduce the problem, and post the event log on the [Indigo forum](https://forums.indigodomo.com/viewforum.php?f=363).
 
 More information on the [GitHub Wiki](https://github.com/ryanbuckner/samsungtv-plugin/wiki).

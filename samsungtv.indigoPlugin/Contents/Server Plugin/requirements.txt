@@ -2,5 +2,5 @@
 # marker so it doesn't reinstall every launch. If you bump a version here,
 # the marker may need to be cleared manually for Indigo to pick it up — see
 # the troubleshooting notes in the Indigo plugin dev docs for the marker path.
-samsungtvws==3.0.4
+samsungtvws[async,encrypted]==3.0.7
 wakeonlan==3.1.0
