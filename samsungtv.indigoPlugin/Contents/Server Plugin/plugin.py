@@ -555,17 +555,18 @@ class Plugin(indigo.PluginBase):
 		except Exception as e:
 			entry = self.deviceList.setdefault(device.id, {})
 			retry_count = entry.get('retryCount', 0)
-			detail, root = self._describeException(e)
-			is_tls_error = "SSL" in type(root).__name__ or "ssl" in str(root).lower()
+			# Full root-cause detail (TLS vs. timeout vs. refused, etc.) lives
+			# in "Run Diagnostics" now — keep the routine log line short and
+			# point there instead of dumping the exception chain inline every
+			# time. The detail is still captured at debug level for anyone
+			# who already has verbose logging on.
+			detail, _root = self._describeException(e)
 			if retry_count == 0:
 				# First failure since the last successful poll (or ever, on a
 				# fresh device) — log it loudly. This is the only signal a user
 				# gets that the configured IP address is wrong, so it must not
 				# be debug-only.
-				if is_tls_error:
-					self.logger.error(f"\"{device.name}\": TLS/SSL handshake with {ipaddress} failed ({detail}) — this usually means a Python library update changed TLS behavior, not that the IP address or TV is wrong")
-				else:
-					self.logger.error(f"\"{device.name}\": cannot reach {ipaddress} — check that the IP address is correct, the TV is powered on, and it's reachable on the network ({detail})")
+				self.logger.error(f"\"{device.name}\": cannot reach {ipaddress} — run \"Run Diagnostics\" on this device (via an Action Group), or Plugins → SamsungTV → Run Diagnostics on All TVs, for details")
 			else:
 				self.logger.debug(f"\"{device.name}\": still unreachable at {ipaddress} (attempt {retry_count + 1}): {detail}")
 			device.setErrorStateOnServer("Unreachable")
