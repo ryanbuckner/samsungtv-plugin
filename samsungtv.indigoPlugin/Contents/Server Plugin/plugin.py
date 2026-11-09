@@ -510,17 +510,25 @@ class Plugin(indigo.PluginBase):
 			info = tv.rest_device_info()
 			tvState = info['device']['PowerState'].lower()
 			self.logger.debug(f"Power state of {device.name}: {tvState}")
-		except Exception:
+		except Exception as e:
 			entry = self.deviceList.setdefault(device.id, {})
 			retry_count = entry.get('retryCount', 0)
+			# SSL/TLS handshake failures (common after a Python dependency
+			# refresh pulls in a newer requests/urllib3 that hardens default TLS
+			# behavior against older embedded HTTPS servers) are NOT a wrong-IP
+			# problem — say so distinctly instead of pointing at the network.
+			is_tls_error = "SSL" in type(e).__name__ or "ssl" in str(e).lower()
 			if retry_count == 0:
 				# First failure since the last successful poll (or ever, on a
 				# fresh device) — log it loudly. This is the only signal a user
 				# gets that the configured IP address is wrong, so it must not
 				# be debug-only.
-				self.logger.error(f"\"{device.name}\": cannot reach {ipaddress} — check that the IP address is correct, the TV is powered on, and it's reachable on the network")
+				if is_tls_error:
+					self.logger.error(f"\"{device.name}\": TLS/SSL handshake with {ipaddress} failed ({e}) — this usually means a Python library update changed TLS behavior, not that the IP address or TV is wrong")
+				else:
+					self.logger.error(f"\"{device.name}\": cannot reach {ipaddress} — check that the IP address is correct, the TV is powered on, and it's reachable on the network ({e})")
 			else:
-				self.logger.debug(f"\"{device.name}\": still unreachable at {ipaddress} (attempt {retry_count + 1})")
+				self.logger.debug(f"\"{device.name}\": still unreachable at {ipaddress} (attempt {retry_count + 1}): {e}")
 			device.setErrorStateOnServer("Unreachable")
 			device.updateStatesOnServer([
 				{'key': 'status',     'value': 'off'},
