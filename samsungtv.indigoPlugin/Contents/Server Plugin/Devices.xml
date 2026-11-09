@@ -7,6 +7,7 @@
 		<SupportURL>https://forums.indigodomo.com/viewforum.php?f=363</SupportURL>
 		<Field id="ipaddress" type="textfield">
 			<Label>IP Address:</Label>
+			<Description>Kept up to date automatically if the TV's address changes (Plugin Config → Follow IP address changes).</Description>
 		</Field>
 		<Field id="method" type="menu" defaultValue="auto">
 			<Label>Protocol:</Label>
@@ -50,7 +51,7 @@
 		<Field id="sepOptions" type="separator"/>
 		<Field id="detectApp" type="checkbox" defaultValue="true">
 			<Label>Detect Running App:</Label>
-			<Description>2016+ TVs only. Disable for faster polling if you don't need this.</Description>
+			<Description>2016+ TVs only.</Description>
 		</Field>
 		<Field id="turnOnActionGroup" type="menu" defaultValue="wol">
 			<Label>Turn On using:</Label>
@@ -170,6 +171,16 @@
 			<ValueType>String</ValueType>
 			<TriggerLabel>Current App</TriggerLabel>
 			<ControlPageLabel>App</ControlPageLabel>
+		</State>
+		<State id="previousIpAddress">
+			<ValueType>String</ValueType>
+			<TriggerLabel>Previous IP Address</TriggerLabel>
+			<ControlPageLabel>Previous IP Address</ControlPageLabel>
+		</State>
+		<State id="ipAddressChangedAt">
+			<ValueType>String</ValueType>
+			<TriggerLabel>IP Address Changed At</TriggerLabel>
+			<ControlPageLabel>IP Address Changed At</ControlPageLabel>
 		</State>
 	</States>
 	<UiDisplayStateId>status</UiDisplayStateId>

@@ -11,4 +11,22 @@
 			<Option value="detailed">Detailed State Logging</Option>
 		</List>
 	</Field>
+
+	<Field id="sepIpTracking" type="separator"/>
+	<Field id="ipTracking" type="checkbox" defaultValue="true">
+		<Label>Follow IP address changes:</Label>
+		<Description>If a TV gets a new IP address from your router, find it and update the device automatically</Description>
+	</Field>
+	<Field id="ipSearchInterval" type="menu" defaultValue="15" visibleBindingId="ipTracking" visibleBindingValue="true" alwaysUseInDialogHeightCalc="true">
+		<Label>Look for a missing TV every:</Label>
+		<List>
+			<Option value="15">15 minutes</Option>
+			<Option value="30">30 minutes</Option>
+			<Option value="45">45 minutes</Option>
+			<Option value="60">60 minutes</Option>
+		</List>
+	</Field>
+	<Field id="ipTrackingNote" type="label" fontSize="small" fontColor="darkgray" visibleBindingId="ipTracking" visibleBindingValue="true" alwaysUseInDialogHeightCalc="true">
+		<Label>A TV is only "missing" while it isn't answering, and it can only be found while it's turned on. The plugin also looks right away when a different device shows up at a TV's address, or right after a Turn On.</Label>
+	</Field>
 </PluginConfig>

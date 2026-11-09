@@ -14,6 +14,7 @@ except ImportError:
 import sys
 import datetime
 import json
+import logging
 import os
 import re
 import subprocess
@@ -93,6 +94,25 @@ UPNP_PORT = 9197
 # HA's power_off_in_progress window.
 POWER_OFF_GRACE = 25
 
+# Device props that really change how the plugin talks to a TV. Indigo
+# restarts a device's comm whenever didDeviceCommPropertyChange() says so;
+# its default compares *every* plugin prop, which made each internal write
+# (learned MAC, detected protocol, installed-app list) restart the device.
+COMM_PROPS = ('ipaddress', 'method', 'port', 'token', 'encToken', 'encSessionId')
+
+# Follow-IP-changes search: allowed intervals (minutes) and the minimum gap
+# between two "urgent" searches (a TV that just vanished or was just woken).
+IP_SEARCH_INTERVALS = (15, 30, 45, 60)
+URGENT_SEARCH_GAP = 60
+
+# SSDP targets for the background search. Narrower than full Discovery (no
+# ssdp:all) to keep it to a few small multicast packets.
+TRACKING_SSDP_TARGETS = (
+	"urn:samsung.com:device:RemoteControlReceiver:1",
+	"urn:dial-multiscreen-org:service:dial:1",
+	"upnp:rootdevice",
+)
+
 METHOD_LABELS = {
 	METHOD_WEBSOCKET: "Websocket (2016+ Tizen)",
 	METHOD_ENCRYPTED: "Encrypted (2014-2015 H/J series)",
@@ -114,6 +134,7 @@ class Plugin(indigo.PluginBase):
 		level = pluginPrefs.get("debugLevel", "off")
 		self.debug         = level in ("debug", "detailed")
 		self.detailedDebug = level == "detailed"
+		self._routeLibraryLogging()
 		# dict keyed by device.id → per-device runtime state (locks, cached
 		# transport, retry counters, power-off grace window, ...)
 		self.deviceList = {}
@@ -123,6 +144,13 @@ class Plugin(indigo.PluginBase):
 		self._authorizing = set()
 		self._authorizingLock = threading.Lock()
 		self.runner = AsyncRunner()
+		# Follow-IP-changes: on unless the user turned it off (a fresh
+		# install has no stored pref, so it defaults on).
+		self._applyIpTrackingPrefs(pluginPrefs)
+		self._searchLock = threading.Lock()
+		# Start the clock at launch so a plugin reload doesn't immediately
+		# fire a network search on top of the staggered startup polls.
+		self._lastSearch = time.monotonic()
 		self.pluginId = pluginId
 		self.pluginprefDirectory = '{}/Preferences/Plugins/com.ryanbuckner.indigoplugin.samsungtv'.format(
 			indigo.server.getInstallFolderPath()
@@ -148,7 +176,6 @@ class Plugin(indigo.PluginBase):
 		self.logger.info("{0:<30} {1}".format("Plugin name:",       self.pluginDisplayName))
 		self.logger.info("{0:<30} {1}".format("Plugin version:",    self.pluginVersion))
 		self.logger.info("{0:<30} {1}".format("Plugin ID:",         self.pluginId))
-		self.logger.info("{0:<30} {1}".format("Token path:",        self.path))
 		self.logger.info("{0:<30} {1}".format("Refresh frequency:", str(self.refresh_frequency) + " seconds"))
 		self.logger.info("{0:<30} {1}".format("samsungtvws version:", self._libVersion()))
 		self.logger.info("{0:<30} {1}".format("Indigo version:",    indigo.server.version))
@@ -282,6 +309,9 @@ class Plugin(indigo.PluginBase):
 							self.updatedevicestates(indigo.devices[deviceId])
 						except Exception:
 							self.logger.exception(f"Error updating device {deviceId}")
+				# Periodic look for TVs that may have moved to a new IP (no-op
+				# unless one is missing and the configured interval has passed).
+				self._maybeSearchForMovedTVs()
 		except self.StopThread:
 			pass
 
@@ -394,6 +424,27 @@ class Plugin(indigo.PluginBase):
 		if not userCancelled:
 			self.refresh_frequency = int(valuesDict.get('refresh_frequency', 30))
 			self._applyDebugLevel(valuesDict.get('debugLevel', 'off'))
+			self._applyIpTrackingPrefs(valuesDict)
+
+	def _applyIpTrackingPrefs(self, prefs):
+		value = prefs.get('ipTracking', True)
+		self.ipTracking = value if isinstance(value, bool) else str(value).lower() in ("true", "1", "yes")
+		try:
+			minutes = int(prefs.get('ipSearchInterval', 15))
+		except (TypeError, ValueError):
+			minutes = 15
+		self.ipSearchMinutes = minutes if minutes in IP_SEARCH_INTERVALS else 15
+
+	def didDeviceCommPropertyChange(self, origDev, newDev):
+		"""Only restart a TV's communication when a real connection setting
+		changed — not when the plugin itself saves something it learned (MAC,
+		detected protocol, app list). Indigo's default compares every prop,
+		which restarted the device, dropped its runtime state and re-logged
+		"connected" after each of those internal writes."""
+		if newDev.deviceTypeId != "televisions":
+			return super().didDeviceCommPropertyChange(origDev, newDev)
+		old, new = origDev.pluginProps, newDev.pluginProps
+		return any(old.get(k, "") != new.get(k, "") for k in COMM_PROPS)
 
 	def menuChanged(self, valuesDict=None, typeId=None, devId=None):
 		return valuesDict
@@ -593,6 +644,60 @@ class Plugin(indigo.PluginBase):
 	# ---------------------------------------------------------------------------
 	# Debug helpers
 	# ---------------------------------------------------------------------------
+	def _routeLibraryLogging(self):
+		"""Make third-party library logging obey the plugin's Debug Logging
+		preference.
+
+		Indigo only attaches its event-log handler to this plugin's "Plugin"
+		logger. samsungtvws, websockets, aiohttp, urllib3 and asyncio log to
+		their own loggers, which have no handler — so their warnings/errors
+		fell through to Python's last-resort stderr handler regardless of the
+		level the user chose (e.g. samsungtvws's "Pin error!!!" on a wrong PIN,
+		websocket error dumps), and the pairing library logs the pairing token
+		itself at INFO.
+
+		Forward them into the plugin's logger instead:
+		  - library WARNING/ERROR → DEBUG: shown only when Debug Logging is on.
+		    The plugin already reports every failure itself in plain language.
+		  - everything below WARNING → THREADDEBUG: the plugin's own log file
+		    only, never the Indigo event log.
+		  - pairing-secret records are dropped entirely.
+		"""
+		plugin_logger = self.logger
+		threaddebug = getattr(logging, "THREADDEBUG", 5)
+
+		class _ForwardToPlugin(logging.Handler):
+			def emit(self, record):
+				try:
+					msg = record.getMessage()
+				except Exception:
+					return
+				if msg.startswith(("Token (ctx)", "Save token to file", "Got token")):
+					return
+				level = logging.DEBUG if record.levelno >= logging.WARNING else threaddebug
+				plugin_logger.log(level, f"[{record.name}] {msg}")
+
+		handler = _ForwardToPlugin()
+		# samsungtvws's own debug detail is worth keeping in the plugin log
+		# file; the transport libraries' debug output is per-frame noise, so
+		# they only emit INFO and up.
+		for name, lib_level in (("samsungtvws", logging.DEBUG), ("websocket", logging.INFO),
+								("websockets", logging.INFO), ("aiohttp", logging.INFO),
+								("urllib3", logging.INFO), ("asyncio", logging.INFO)):
+			lib_logger = logging.getLogger(name)
+			lib_logger.handlers = [handler]
+			lib_logger.propagate = False
+			lib_logger.setLevel(lib_level)
+
+		# samsungtvws talks to the TV's self-signed HTTPS endpoint (port 8002)
+		# with verify=False by design; without this every REST call raises an
+		# InsecureRequestWarning outside the logging system entirely.
+		try:
+			import urllib3
+			urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+		except Exception:
+			pass
+
 	def _applyDebugLevel(self, level):
 		self.debug         = level in ("debug", "detailed")
 		self.detailedDebug = level == "detailed"
@@ -648,22 +753,12 @@ class Plugin(indigo.PluginBase):
 			self.logger.info("{0:-^130}".format(""))
 		self.logger.info("{0:=^130}".format(""))
 
-	def discoverSamsungTVs(self):
+	def _ssdpSearch(self, search_targets, mx):
+		"""Send one SSDP M-SEARCH per target and return the IPs of devices
+		whose reply mentions Samsung. One small multicast packet per target —
+		not a scan of the network."""
 		SSDP_ADDR = "239.255.255.250"
 		SSDP_PORT = 1900
-		SSDP_MX   = 4
-
-		# Multiple STs maximize coverage across Samsung firmware versions.
-		# ssdp:all catches everything; the narrow STs catch older models that only respond to them.
-		search_targets = [
-			"ssdp:all",
-			"upnp:rootdevice",
-			"urn:samsung.com:device:RemoteControlReceiver:1",
-			"urn:dial-multiscreen-org:service:dial:1",
-		]
-
-		self.logger.info("Scanning network for Samsung TVs — this takes about 20 seconds...")
-
 		candidate_ips = set()
 
 		for st in search_targets:
@@ -671,7 +766,7 @@ class Plugin(indigo.PluginBase):
 				"M-SEARCH * HTTP/1.1",
 				f"HOST: {SSDP_ADDR}:{SSDP_PORT}",
 				'MAN: "ssdp:discover"',
-				f"MX: {SSDP_MX}",
+				f"MX: {mx}",
 				f"ST: {st}",
 				"", ""
 			])
@@ -680,7 +775,7 @@ class Plugin(indigo.PluginBase):
 				sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 				sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 				sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
-				sock.settimeout(SSDP_MX + 1)
+				sock.settimeout(mx + 1)
 
 				# Bind to the local interface so multicast egresses on the right NIC (important on macOS)
 				try:
@@ -708,6 +803,19 @@ class Plugin(indigo.PluginBase):
 						sock.close()
 					except Exception:
 						pass
+		return candidate_ips
+
+	def discoverSamsungTVs(self):
+		self.logger.info("Scanning network for Samsung TVs — this takes about 20 seconds...")
+
+		# Multiple STs maximize coverage across Samsung firmware versions.
+		# ssdp:all catches everything; the narrow STs catch older models that only respond to them.
+		candidate_ips = self._ssdpSearch([
+			"ssdp:all",
+			"upnp:rootdevice",
+			"urn:samsung.com:device:RemoteControlReceiver:1",
+			"urn:dial-multiscreen-org:service:dial:1",
+		], mx=4)
 
 		# Every configured TV is a candidate too, so a TV that ignores SSDP still
 		# gets its protocol reported here.
@@ -1033,11 +1141,23 @@ class Plugin(indigo.PluginBase):
 			self._handlePollFailure(device, entry, e, ipaddress)
 			return
 
+		dev_info = (info or {}).get('device', {})
+
+		# Is this still *our* TV? DHCP can hand this TV's old address to a
+		# different device — even another Samsung TV — and without this check
+		# the plugin would happily report that device's state as this one's.
+		if self.ipTracking:
+			reason = self._identityMismatch(device, ipaddress, dev_info)
+			if reason:
+				self._handleWrongDeviceAtIp(device, entry, ipaddress, reason)
+				return
+		entry.pop('missing', None)
+		entry.pop('mismatchLogged', None)
+
 		# Power state. Only 2018+ firmware reports PowerState; when it's
 		# missing (2014-2017 TVs), answering at all means the TV is on — these
 		# sets drop off the network in standby. This is the fix for TVs that
 		# were permanently "unreachable" because the plugin used to require it.
-		dev_info = (info or {}).get('device', {})
 		power_state = (dev_info.get('PowerState') or "").strip().lower()
 		if power_state:
 			tvState = "on" if power_state == "on" else power_state
@@ -1170,6 +1290,18 @@ class Plugin(indigo.PluginBase):
 				self.logger.debug(f"\"{device.name}\": still not responding at {ipaddress} (attempt {retry_count + 1}): {detail}")
 			entry['lastFailureKind'] = 'network'
 			self._setOff(device)
+
+			# A known TV that stopped answering is either off (normal) or has
+			# moved to a new IP. Mark it so the periodic search looks for it,
+			# and search right away if the old address now clearly belongs to
+			# a different device (its MAC in the ARP table changed).
+			if seen_before and self.ipTracking:
+				entry['missing'] = True
+				known_mac = self._normMac(device.pluginProps.get('macaddress', ''))
+				arp_mac = self._macFromArp(ipaddress)
+				if known_mac and arp_mac and arp_mac != known_mac:
+					self.logger.debug(f"\"{device.name}\": {ipaddress} now belongs to {arp_mac}, not {known_mac} — searching for the TV")
+					self._maybeSearchForMovedTVs(urgent=True)
 		else:
 			# The TV answered, but with something we didn't expect — that's a
 			# real problem worth surfacing with the actual detail, not a generic
@@ -1181,6 +1313,166 @@ class Plugin(indigo.PluginBase):
 			entry['lastFailureKind'] = 'unexpected'
 			device.setErrorStateOnServer("error")
 		entry['retryCount'] = retry_count + 1
+
+	# ---------------------------------------------------------------------------
+	# Follow IP address changes. A TV's identity is its Samsung device ID
+	# (2014+) and its MAC address; its IP is only its last known address.
+	# ---------------------------------------------------------------------------
+	def _normMac(self, mac):
+		parts = re.split(r"[:\-]", (mac or "").strip())
+		if len(parts) != 6:
+			return ""
+		return ":".join(p.zfill(2) for p in parts).upper()
+
+	def _identityMismatch(self, device, ip, dev_info):
+		"""Returns a short description of whatever is answering at `ip` if
+		it's provably NOT this TV, else None. Only compares what's known on
+		both sides, so a brand-new device (nothing learned yet) never trips it."""
+		known_id = device.states.get('device_id', '') or ""
+		seen_id = dev_info.get('id', '') or dev_info.get('duid', '') or ""
+		if known_id and seen_id:
+			if known_id != seen_id:
+				return f"\"{dev_info.get('name', 'another TV')}\" ({dev_info.get('modelName', 'unknown model')})"
+			return None
+		# No device ID to compare (pre-2014 TVs): fall back to the MAC that's
+		# answering at this IP. Only used without an ID, because a TV moved
+		# between Wi-Fi and Ethernet legitimately changes MAC.
+		known_mac = self._normMac(device.pluginProps.get('macaddress', ''))
+		arp_mac = self._macFromArp(ip)
+		if known_mac and arp_mac and known_mac != arp_mac:
+			return f"a device with MAC {arp_mac}"
+		return None
+
+	def _handleWrongDeviceAtIp(self, device, entry, ip, reason):
+		if not entry.get('mismatchLogged'):
+			self.logger.warning(
+				f"\"{device.name}\": {reason} is now answering at {ip} — this TV's IP address has probably changed. "
+				"Searching the network for it…"
+			)
+			entry['mismatchLogged'] = True
+		device.setErrorStateOnServer("IP changed")
+		self._setOff(device)
+		entry['missing'] = True
+		self._maybeSearchForMovedTVs(urgent=True)
+
+	def _missingTVs(self):
+		missing = []
+		for devId, entry in list(self.deviceList.items()):
+			if entry.get('missing') and devId in indigo.devices:
+				missing.append(devId)
+		return missing
+
+	def _maybeSearchForMovedTVs(self, urgent=False):
+		"""Start a background search for TVs that may have changed IP — if
+		tracking is on, at least one known TV is missing, and enough time has
+		passed (the configured interval, or URGENT_SEARCH_GAP for urgent
+		requests). Never runs two searches at once."""
+		if not self.ipTracking:
+			return
+		missing = self._missingTVs()
+		if not missing:
+			return
+		gap = URGENT_SEARCH_GAP if urgent else self.ipSearchMinutes * 60
+		if time.monotonic() - self._lastSearch < gap:
+			return
+		if not self._searchLock.acquire(blocking=False):
+			return
+		self._lastSearch = time.monotonic()
+		threading.Thread(target=self._searchForMovedTVs, args=(missing,),
+						 name="SamsungTV-ip-search", daemon=True).start()
+
+	def _identifyAt(self, ip):
+		"""(device ID, MAC) of whatever answers at ip — either may be ''."""
+		device_id = ""
+		try:
+			_port, info = self._probeRest(ip, [WEBSOCKET_NO_SSL_PORT, WEBSOCKET_SSL_PORT], 1.5)
+			device_id = info['device'].get('id', '') or info['device'].get('duid', '') or ""
+		except Exception:
+			pass
+		# The SSDP reply that put this IP on the candidate list also put its
+		# MAC in the ARP cache, so this works for pre-2014 TVs with no REST API.
+		return device_id, self._macFromArp(ip)
+
+	def _searchForMovedTVs(self, devIds):
+		try:
+			self.logger.debug(f"Searching the network for {len(devIds)} TV(s) that may have changed IP address")
+			candidates = self._ssdpSearch(TRACKING_SSDP_TARGETS, mx=2)
+
+			# Addresses where another configured TV is currently answering as
+			# itself aren't candidates — that's how two TVs that swapped
+			# addresses get sorted out without stealing each other's IP.
+			verified = set()
+			for d in indigo.devices.iter("self"):
+				if d.deviceTypeId == "televisions" and d.id not in devIds:
+					if not self.deviceList.get(d.id, {}).get('missing'):
+						verified.add(d.pluginProps.get('ipaddress', ''))
+			candidates -= verified
+
+			wanted = {}
+			for devId in devIds:
+				if devId not in indigo.devices:
+					continue
+				dev = indigo.devices[devId]
+				wanted[devId] = (dev.states.get('device_id', '') or "",
+								 self._normMac(dev.pluginProps.get('macaddress', '')),
+								 dev.pluginProps.get('ipaddress', ''))
+
+			for ip in sorted(candidates):
+				if not wanted:
+					break
+				seen_id, seen_mac = self._identifyAt(ip)
+				for devId, (known_id, known_mac, old_ip) in list(wanted.items()):
+					if ip == old_ip:
+						continue
+					if (known_id and seen_id and known_id == seen_id) or \
+					   (not (known_id and seen_id) and known_mac and seen_mac == known_mac):
+						self._adoptNewIp(devId, old_ip, ip)
+						del wanted[devId]
+						break
+
+			for devId in wanted:
+				self.logger.debug(f"\"{indigo.devices[devId].name}\" not found on the network (probably off)")
+		except Exception:
+			self.logger.exception("Error while searching for TVs that changed IP address")
+		finally:
+			self._searchLock.release()
+
+	def _adoptNewIp(self, devId, old_ip, new_ip):
+		device = indigo.devices[devId]
+		self.logger.info(f"\"{device.name}\": IP address changed from {old_ip} to {new_ip} — updated automatically")
+		device.updateStatesOnServer([
+			{'key': 'previousIpAddress',  'value': old_ip},
+			{'key': 'ipAddressChangedAt', 'value': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+		])
+		device.setErrorStateOnServer(None)
+		self._closeTV(device)
+		# The pairing (token file name, PIN credentials) stays as-is — it
+		# belongs to the TV, not its address. ipaddress is a comm prop, so
+		# Indigo restarts the device, which re-polls it at the new address.
+		self._updateProps(device, {'ipaddress': new_ip, 'address': new_ip, 'detectedFor': ""})
+		self._fireIpChangedTriggers(devId)
+
+	def _fireIpChangedTriggers(self, devId):
+		for trigger in indigo.triggers.iter("self.ipAddressChanged"):
+			if not trigger.enabled:
+				continue
+			target = trigger.pluginProps.get('deviceId', 'any') or 'any'
+			if target == 'any' or str(target) == str(devId):
+				indigo.trigger.execute(trigger)
+
+	def getTVList(self, filter="", valuesDict=None, typeId="", targetId=0):
+		tvs = [(str(d.id), d.name) for d in indigo.devices.iter("self") if d.deviceTypeId == "televisions"]
+		return [("any", "Any Samsung TV")] + sorted(tvs, key=lambda t: t[1].lower())
+
+	def getEventConfigUiValues(self, pluginProps, typeId, eventId):
+		valuesDict = indigo.Dict(pluginProps)
+		errorsDict = indigo.Dict()
+		# Same dynamic-list default problem as "Turn On using": set it here.
+		if typeId == "ipAddressChanged":
+			valid = {value for value, _label in self.getTVList()}
+			if valuesDict.get('deviceId', '') not in valid:
+				valuesDict['deviceId'] = "any"
+		return (valuesDict, errorsDict)
 
 	def _getCurrentApp(self, ip, device):
 		"""Poll the TV for the foreground app from COMMON_APPS. Returns app name or empty string.
@@ -1562,6 +1854,20 @@ class Plugin(indigo.PluginBase):
 			pass
 		return targets
 
+	def _afterTurnOn(self, device):
+		"""Quick follow-up polls so the state catches up in seconds — and, if
+		the TV still hasn't answered at its old address by the time it should
+		have booted, search for it: Wake-on-LAN is MAC-based, so it wakes the
+		TV even if DHCP has since given it a different IP."""
+		self._schedulePolls(device, [4, 8, 15, 30])
+		devId = device.id
+
+		def search_if_still_missing():
+			time.sleep(35)
+			if self.deviceList.get(devId, {}).get('missing'):
+				self._maybeSearchForMovedTVs(urgent=True)
+		threading.Thread(target=search_if_still_missing, daemon=True).start()
+
 	def turnOnTV(self, device):
 		"""Returns "sent", "already" (already on — not a failure), or "failed"."""
 		device = indigo.devices[device.id]
@@ -1579,7 +1885,7 @@ class Plugin(indigo.PluginBase):
 			try:
 				indigo.actionGroup.execute(ag.id)
 				self.logger.info(f"\"{device.name}\": ran turn-on action group \"{ag.name}\"")
-				self._schedulePolls(device, [4, 8, 15, 30])
+				self._afterTurnOn(device)
 				return "sent"
 			except Exception as e:
 				self.logger.error(f"\"{device.name}\": turn-on action group \"{ag.name}\" failed: {e} — falling back to Wake-on-LAN")
@@ -1603,12 +1909,12 @@ class Plugin(indigo.PluginBase):
 				except Exception as m:
 					self.logger.debug(f"WOL to {target} for \"{device.name}\" failed: {m}")
 			if sent:
-				self.logger.info(f"Sent Wake-on-LAN to {macaddress} for \"{device.name}\"")
+				self.logger.debug(f"Sent Wake-on-LAN to {macaddress} for \"{device.name}\"")
 		if not sent:
 			if not macaddress:
 				self.logger.error(f"\"{device.name}\": no MAC address stored — turn the TV on manually once so the plugin can learn it, or set a turn-on action group in the device config")
 			return "failed"
-		self._schedulePolls(device, [4, 8, 15, 30])
+		self._afterTurnOn(device)
 		return "sent"
 
 	def turnOffTV(self, device):
@@ -1618,7 +1924,7 @@ class Plugin(indigo.PluginBase):
 		if device.states.get('status') not in ("on",) or self._powerOffInProgress(entry):
 			self.logger.info(f"\"{device.name}\" is not on")
 			return "already"
-		self.logger.info(f"Sending power off to \"{device.name}\"")
+		self.logger.debug(f"Sending power off to \"{device.name}\"")
 		try:
 			transport = self._getTransport(device)
 			transport.power_off(device.pluginProps.get('model', ''))

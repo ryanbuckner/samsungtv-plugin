@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<Events>
+	<SupportURL>https://forums.indigodomo.com/viewforum.php?f=363</SupportURL>
+
+	<Event id="ipAddressChanged">
+		<Name>TV IP Address Changed</Name>
+		<ConfigUI>
+			<Field id="deviceId" type="menu" defaultValue="any">
+				<Label>TV:</Label>
+				<List class="self" method="getTVList" dynamicReload="true"/>
+			</Field>
+			<Field id="ipChangedNote" type="label" fontSize="small" fontColor="darkgray">
+				<Label>Fires when the plugin finds a TV at a new IP address and updates it. The TV's Previous IP Address and IP Address Changed At states are set before the trigger runs.</Label>
+			</Field>
+		</ConfigUI>
+	</Event>
+</Events>

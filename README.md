@@ -17,6 +17,12 @@ This plugin is not endorsed by or affiliated with Samsung.
 
 ---
 
+### What's New in 2026.1.1
+
+- **TVs that change IP address keep working.** If your router gives a TV a new address, the plugin finds it on your network and updates the device for you. You can also run a trigger when that happens. It's on by default, and you can turn it off in the plugin settings.
+- **Logging follows your setting.** With Debug Logging on *Critical*, the event log only shows errors and normal activity. No more stray library messages.
+- **Quieter, steadier devices.** A TV no longer briefly restarts in Indigo every time the plugin learns something new about it.
+
 ### What's New in 2026.1.0
 
 - **Older TVs now work.** 2014–2015 TVs (model numbers with an **H** or **J**, like UN48**J**U6400) and pre-2014 TVs can now be added. Some 2016–2017 TVs that used to show as permanently "unreachable" now work too.
@@ -63,7 +69,7 @@ Download `SamsungTV.indigoPlugin` and double-click it to install.
 
 1. **Turn the TV on.**
 2. In Indigo, create a new device. Choose **SamsungTV** → **Samsung TV**.
-3. Enter the TV's **IP address**. You'll find it on the TV under Settings → General → Network → Network Status. Better still, give it a fixed address in your router so it never changes.
+3. Enter the TV's **IP address**. You'll find it on the TV under Settings → General → Network → Network Status. If the address changes later, the plugin follows it automatically, but giving the TV a fixed address in your router is still best.
 4. Click **Detect TV**. You should see your TV's name and model.
 5. Click **Pair / Authorize**:
    - **Most TVs:** a prompt appears on the TV. Press **Allow** with the TV remote within 30 seconds. The Indigo event log confirms when it worked.
@@ -86,6 +92,10 @@ That's it. The TV's status shows in Indigo within a few seconds.
 
 - **Refresh frequency:** how often Indigo checks each TV (default 30 seconds).
 - **Debug Logging:** leave on *Critical* unless you're troubleshooting.
+- **Follow IP address changes:** on by default. If a TV stops answering at its address, the plugin looks for it on your network and updates the device when it finds it.
+- **Look for a missing TV every:** 15, 30, 45 or 60 minutes (default 15). The plugin also looks right away when a different device shows up at a TV's address, and right after you turn a TV on.
+
+> A TV can only be found while it's turned on. If a TV is off, the plugin finds it the next time someone turns it on.
 
 ---
 
@@ -126,8 +136,18 @@ Add these to Action Groups, Triggers and Schedules (choose **SamsungTV** as the 
 | Current App | `Netflix`, `YouTube`, … |
 | Current Source | `HDMI 1`, `TV`, `Smart Hub` (an app is running) |
 | Model | `QN65Q80T`, `UN48JU6400`, … |
+| Previous IP Address | the TV's address before it last changed |
+| IP Address Changed At | when the plugin last updated the TV's address |
 
 **Example trigger:** *Device State Changed → Living Room TV → Current App → becomes equal to → Netflix* → run your "Movie Mode" action group.
+
+#### Triggers
+
+| Trigger | When it fires |
+|---------|---------------|
+| TV IP Address Changed | The plugin found a TV at a new IP address and updated it. Pick one TV or *Any Samsung TV*. |
+
+**Example:** *SamsungTV → TV IP Address Changed → Any Samsung TV* → send yourself an email or push notification, as a reminder to reserve the TV's address in your router. The TV's **Previous IP Address** state tells you which address it moved from.
 
 #### Plugins menu
 
@@ -190,7 +210,8 @@ plugin.executeAction("setVolume",    deviceId=tv.id, props={"volumeLevel": "20"}
 
 **Start with Plugins → SamsungTV → Run Diagnostics on All TVs.** It checks each TV and writes a plain-English explanation of any problem to the event log.
 
-- **The TV shows "off" but it's on.** The TV's IP address has probably changed. Check it on the TV (Settings → General → Network → Network Status), update the device, and consider reserving the address in your router.
+- **The TV shows "off" but it's on.** The TV's IP address has probably changed. With **Follow IP address changes** on, the plugin finds it within your chosen search interval (or right away when you turn the TV on from Indigo). Otherwise, check the address on the TV (Settings → General → Network → Network Status) and update the device. Either way, reserving the address in your router prevents it.
+- **The TV shows an "IP changed" badge.** A different device is now using this TV's old address. The plugin is already looking for the TV, and it updates the device as soon as the TV is on.
 - **The TV shows a red "no response" badge.** Indigo has never been able to reach the TV. Usually the IP address is wrong, or the TV was off when you added it. Turn the TV on and click **Detect TV** again.
 - **Status works but buttons don't.** The TV hasn't been paired. Edit the device, click **Pair / Authorize**, and accept the prompt (or enter the PIN) on the TV.
 - **Turn On doesn't work.** Many TVs, especially 2015 and older on Wi‑Fi, can't be woken over the network. Set **Turn On using** to an action group that turns the TV on another way (see *Optional device settings*). On newer TVs, also check that **Settings → General → Network → Expert Settings → Power On with Mobile** is enabled.
