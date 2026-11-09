@@ -45,9 +45,9 @@ This plugin is not endorsed by or affiliated with Samsung.
 
 | | 2016 and newer | 2014–2015 (H / J models) | 2013 and older |
 |---|:-:|:-:|:-:|
-| On/off status, volume and mute level | ✅ | ✅ | ✅ (status) |
+| On/off status, volume and mute level | ✅ | ✅ | ✅ |
 | Turn on / off | ✅ | ✅ | ✅ |
-| Volume, mute, remote buttons, channels, inputs | ✅ | ✅ after PIN pairing | ✅ |
+| Volume, mute, remote buttons, channels, inputs | ✅ | ✅ | ✅ |
 | Launch apps / see the current app | ✅ | — | — |
 | Send Text, Open URL, Press and Hold | ✅ | — | — |
 
