@@ -17,7 +17,7 @@
 		</Field>
 		<Field id="detectApp" type="checkbox" defaultValue="true">
 			<Label>Detect Running App:</Label>
-			<Description>Polls for the foreground streaming app (Netflix, YouTube, etc). Uses extra API calls per poll — disable for faster/leaner polling if you don't need this.</Description>
+			<Description>Disable for faster polling if you don't need this.</Description>
 		</Field>
 	</ConfigUI>
 	<States>

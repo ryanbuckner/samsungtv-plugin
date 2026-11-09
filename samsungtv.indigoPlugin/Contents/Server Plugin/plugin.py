@@ -171,7 +171,10 @@ class Plugin(indigo.PluginBase):
 				with open(token_path, 'w'):
 					pass
 			except Exception as e:
-				self.logger.debug(f"Error creating token file for \"{device.name}\": {e}")
+				# Visible at the default log level: a failed token file means
+				# samsungtvws has nowhere to persist the TV's auth token, so the
+				# device will never work until this is fixed.
+				self.logger.error(f"Could not create token file for \"{device.name}\" at {token_path}: {e}")
 
 	def _backgroundPoll(self, device):
 		threading.Thread(target=self._safePoll, args=(device,), daemon=True).start()
@@ -208,7 +211,10 @@ class Plugin(indigo.PluginBase):
 	# ---------------------------------------------------------------------------
 	# Validation
 	# ---------------------------------------------------------------------------
-	def validateDeviceConfigUi(self, valuesDict, typeId, device):
+	def validateDeviceConfigUi(self, valuesDict, typeId, devId):
+		# Note: devId is a plain int (not a Device object) per the Indigo SDK —
+		# it has no .name/.id attributes, and for a brand-new device being
+		# created for the first time it may not exist in indigo.devices yet.
 		if typeId == 'televisions':
 			ip_str = valuesDict.get('ipaddress', '').strip()
 			if not ip_str:
@@ -218,6 +224,7 @@ class Plugin(indigo.PluginBase):
 			try:
 				ipaddress_module.ip_address(ip_str)
 			except ValueError:
+				self.logger.error(f"Samsung TV device config: \"{ip_str}\" is not a valid IP address")
 				errorsDict = indigo.Dict()
 				errorsDict['ipaddress'] = "Enter a valid IP address (e.g. 192.168.1.50)"
 				return (False, valuesDict, errorsDict)
@@ -231,6 +238,7 @@ class Plugin(indigo.PluginBase):
 				if not (1 <= int(port_str) <= 65535):
 					raise ValueError
 			except ValueError:
+				self.logger.error(f"Samsung TV device config: \"{port_str}\" is not a valid port (must be 1-65535)")
 				errorsDict = indigo.Dict()
 				errorsDict['port'] = "Port must be a number between 1 and 65535"
 				return (False, valuesDict, errorsDict)
@@ -503,19 +511,31 @@ class Plugin(indigo.PluginBase):
 			tvState = info['device']['PowerState'].lower()
 			self.logger.debug(f"Power state of {device.name}: {tvState}")
 		except Exception:
-			self.logger.debug(f"Cannot reach {device.address} — marking offline")
+			entry = self.deviceList.setdefault(device.id, {})
+			retry_count = entry.get('retryCount', 0)
+			if retry_count == 0:
+				# First failure since the last successful poll (or ever, on a
+				# fresh device) — log it loudly. This is the only signal a user
+				# gets that the configured IP address is wrong, so it must not
+				# be debug-only.
+				self.logger.error(f"\"{device.name}\": cannot reach {ipaddress} — check that the IP address is correct, the TV is powered on, and it's reachable on the network")
+			else:
+				self.logger.debug(f"\"{device.name}\": still unreachable at {ipaddress} (attempt {retry_count + 1})")
 			device.setErrorStateOnServer("Unreachable")
 			device.updateStatesOnServer([
 				{'key': 'status',     'value': 'off'},
 				{'key': 'onOffState', 'value': False},
 			])
 			device.updateStateImageOnServer(indigo.kStateImageSel.SensorOff)
-			if device.id in self.deviceList:
-				self.deviceList[device.id]['retryCount'] = self.deviceList[device.id].get('retryCount', 0) + 1
+			entry['retryCount'] = retry_count + 1
 			return
 
-		# Clear any previous error badge
+		# Clear any previous error badge, and announce recovery if this TV was
+		# previously unreachable (so fixing a bad IP address is visible too).
 		device.setErrorStateOnServer(None)
+		entry = self.deviceList.setdefault(device.id, {})
+		if entry.get('retryCount', 0) > 0:
+			self.logger.info(f"\"{device.name}\": reachable again at {ipaddress}")
 
 		# Persist MAC into pluginProps so WOL works even before first successful poll
 		mac = info['device'].get('wifiMac', '')
