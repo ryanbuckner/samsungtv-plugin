@@ -16,4 +16,8 @@
 		<Name>Discover Samsung TVs on Network</Name>
 		<CallbackMethod>discoverSamsungTVs</CallbackMethod>
 	</MenuItem>
+	<MenuItem id="menu5">
+		<Name>Run Diagnostics on All TVs</Name>
+		<CallbackMethod>runDiagnosticsOnAllTVs</CallbackMethod>
+	</MenuItem>
 </MenuItems>

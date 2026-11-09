@@ -766,10 +766,27 @@ class Plugin(indigo.PluginBase):
 
 	# ---------------------------------------------------------------------------
 	# runDiagnostics action — step-by-step connectivity check, written to the
-	# event log. Accessible from the device's right-click menu in Indigo (same
-	# place as Refresh Data) via Actions.xml's deviceFilter.
+	# event log. Actions.xml entries are NOT a device right-click menu item in
+	# Indigo — they're only reachable by adding a step to an Action Group,
+	# Trigger, or Schedule (confirmed against the real IndigoSDK examples and
+	# the Indigo docs; see the "Run Diagnostics on All TVs" Plugins-menu item
+	# below for a true zero-setup way to run this).
 	# ---------------------------------------------------------------------------
 	def runDiagnostics(self, pluginAction, device):
+		self._runDiagnosticsForDevice(device)
+
+	def runDiagnosticsOnAllTVs(self):
+		"""Plugins → SamsungTV → Run Diagnostics on All TVs — the actual
+		one-click, no-setup path, since Actions.xml entries require an Action
+		Group to be reachable at all."""
+		devices = [d for d in indigo.devices.iter("self") if d.deviceTypeId == "televisions"]
+		if not devices:
+			self.logger.info("No Samsung TV devices are configured")
+			return
+		for dev in devices:
+			self._runDiagnosticsForDevice(dev)
+
+	def _runDiagnosticsForDevice(self, device):
 		name = device.name
 		ip = device.pluginProps.get('ipaddress', '').strip()
 		configured_port = self._getPort(device)
