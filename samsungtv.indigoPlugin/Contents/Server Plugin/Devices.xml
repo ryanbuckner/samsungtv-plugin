@@ -7,7 +7,7 @@
 		<SupportURL>https://forums.indigodomo.com/viewforum.php?f=363</SupportURL>
 		<Field id="ipaddress" type="textfield">
 			<Label>IP Address:</Label>
-			<Description>Kept up to date automatically if the TV's address changes (Plugin Config → Follow IP address changes).</Description>
+			<Description>Kept up to date automatically if the TV's address changes (Plugin Config → Detect IP address changes).</Description>
 		</Field>
 		<Field id="method" type="menu" defaultValue="auto">
 			<Label>Protocol:</Label>

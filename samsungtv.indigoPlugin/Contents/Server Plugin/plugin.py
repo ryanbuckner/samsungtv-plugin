@@ -13,6 +13,7 @@ except ImportError:
 
 import sys
 import datetime
+import functools
 import json
 import logging
 import os
@@ -122,6 +123,42 @@ METHOD_LABELS = {
 
 class UnexpectedResponse(Exception):
 	"""The TV answered, but not with something we understand."""
+
+
+def _deviceAction(fn):
+	"""Guard for every Actions.xml callback that targets a TV.
+
+	Indigo passes the action's device as `device`, but it passes None when the
+	action has no TV selected or points at a device that no longer exists
+	(e.g. the TV device was deleted and re-created, which gives it a new id).
+	Without this, every action crashed with "'NoneType' object has no
+	attribute 'id'". Resolve the device from the action itself when possible;
+	otherwise log one clear, fixable error instead of a traceback.
+
+	callerWaitingForResult is only forwarded to callbacks that accept it, so
+	the wrapper's own signature can't change how Indigo calls them."""
+	import inspect
+	accepts_caller = len(inspect.signature(fn).parameters) > 3   # self, pluginAction, device, [callerWaitingForResult]
+
+	@functools.wraps(fn)
+	def wrapper(self, pluginAction, device=None, callerWaitingForResult=None):
+		if device is None:
+			dev_id = getattr(pluginAction, 'deviceId', 0) if pluginAction is not None else 0
+			if dev_id and dev_id in indigo.devices:
+				device = indigo.devices[dev_id]
+			else:
+				action_id = getattr(pluginAction, 'pluginTypeId', '') or fn.__name__
+				self.logger.error(
+					f"Samsung TV action \"{action_id}\" has no TV to act on"
+					+ (f" (device id {dev_id} no longer exists)" if dev_id else "")
+					+ ". Edit the action and choose a TV — if you deleted and re-created the TV device, "
+					"actions that used the old one need the new one picked."
+				)
+				return None
+		if accepts_caller:
+			return fn(self, pluginAction, device, callerWaitingForResult)
+		return fn(self, pluginAction, device)
+	return wrapper
 
 
 class Plugin(indigo.PluginBase):
@@ -1054,8 +1091,19 @@ class Plugin(indigo.PluginBase):
 			self._closeTV(device)
 		transport = self._getTransport(device)
 		if not isinstance(transport, WebsocketTransport):
-			raise NotSupportedError(f"this needs a 2016+ Tizen TV — \"{device.name}\" uses the {METHOD_LABELS[transport.method]} protocol")
+			age = "a 2014–2015 model" if transport.method == METHOD_ENCRYPTED else "a 2013-or-older model"
+			raise NotSupportedError(f"it only works on 2016 and newer Samsung TVs, and this TV is {age}")
 		return transport
+
+	def _logActionError(self, device, what, e):
+		"""One wording for every action failure: a TV that can't do the
+		feature at all, a TV that isn't paired yet, or a real failure."""
+		if isinstance(e, NotSupportedError):
+			self.logger.error(f"{what} isn't available on \"{device.name}\": {e}")
+		elif isinstance(e, NeedsPairingError):
+			self._logNeedsPairing(device)
+		else:
+			self.logger.error(f"{what} failed on \"{device.name}\": {self._describeException(e)[0]}")
 
 	def _closeTV(self, device):
 		entry = self.deviceList.get(device.id)
@@ -1534,7 +1582,7 @@ class Plugin(indigo.PluginBase):
 			apps = self._getTV(device).app_list()
 		except Exception as e:
 			if announce:
-				self.logger.error(f"Couldn't fetch the app list from \"{device.name}\": {self._describeException(e)[0]}")
+				self._logActionError(device, "Refresh Installed Apps", e)
 			return
 		if not apps:
 			if announce:
@@ -1551,6 +1599,7 @@ class Plugin(indigo.PluginBase):
 		msg = f"\"{device.name}\": {len(mapping)} installed apps available to Launch App"
 		self.logger.info(msg) if announce else self.logger.debug(msg)
 
+	@_deviceAction
 	def refreshAppListAction(self, pluginAction, device, callerWaitingForResult=None):
 		self._refreshAppList(device.id, True)
 
@@ -1632,6 +1681,7 @@ class Plugin(indigo.PluginBase):
 			device.updateStateOnServer("isMuted", muted)
 		return volume, muted
 
+	@_deviceAction
 	def refresh_tv_data(self, pluginAction, device):
 		self.updatedevicestates(device)
 
@@ -1643,6 +1693,7 @@ class Plugin(indigo.PluginBase):
 	# the Indigo docs; see the "Run Diagnostics on All TVs" Plugins-menu item
 	# below for a true zero-setup way to run this).
 	# ---------------------------------------------------------------------------
+	@_deviceAction
 	def runDiagnostics(self, pluginAction, device):
 		self._runDiagnosticsForDevice(device)
 
@@ -1798,6 +1849,7 @@ class Plugin(indigo.PluginBase):
 	# ---------------------------------------------------------------------------
 	# Power actions
 	# ---------------------------------------------------------------------------
+	@_deviceAction
 	def toggleTVPower(self, pluginAction, device):
 		device = indigo.devices[device.id]
 		if device.states.get('status') == "on":
@@ -1805,9 +1857,11 @@ class Plugin(indigo.PluginBase):
 		else:
 			self._reportPowerResult(device, self.turnOnTV(device), turning_on=True)
 
+	@_deviceAction
 	def turnOnTVAction(self, pluginAction, device, callerWaitingForResult=None):
 		self._reportPowerResult(device, self.turnOnTV(device), turning_on=True)
 
+	@_deviceAction
 	def turnOffTVAction(self, pluginAction, device, callerWaitingForResult=None):
 		self._reportPowerResult(device, self.turnOffTV(device), turning_on=False)
 
@@ -1834,9 +1888,11 @@ class Plugin(indigo.PluginBase):
 			self.logger.error(f"send \"{device.name}\" {verb} failed")
 		# "already": turnOnTV()/turnOffTV() already logged an info line — nothing more to do.
 
+	@_deviceAction
 	def volumeUpAction(self, pluginAction, device, callerWaitingForResult=None):
 		self._volumeUp(device)
 
+	@_deviceAction
 	def volumeDownAction(self, pluginAction, device, callerWaitingForResult=None):
 		self._volumeDown(device)
 
@@ -2018,6 +2074,7 @@ class Plugin(indigo.PluginBase):
 		'blue':         "KEY_CYAN",
 	}
 
+	@_deviceAction
 	def sendCommand(self, pluginAction, device, callerWaitingForResult=None):
 		cmd = pluginAction.props.get("commandCode", "")
 		self.logger.debug(f"sendCommand '{cmd}' → {device.name}")
@@ -2038,6 +2095,7 @@ class Plugin(indigo.PluginBase):
 	# ---------------------------------------------------------------------------
 	# sendKeyCode action — arbitrary Samsung key code
 	# ---------------------------------------------------------------------------
+	@_deviceAction
 	def sendKeyCode(self, pluginAction, device, callerWaitingForResult=None):
 		key = pluginAction.props.get("keyCode", "").strip()
 		if not key:
@@ -2050,6 +2108,7 @@ class Plugin(indigo.PluginBase):
 	# sendKeySequence action — several keys, with repeats and inter-key delay
 	# (HA's remote.send_command with num_repeats / delay_secs)
 	# ---------------------------------------------------------------------------
+	@_deviceAction
 	def sendKeySequence(self, pluginAction, device, callerWaitingForResult=None):
 		raw = pluginAction.props.get("keySequence", "")
 		keys = [k.strip().upper() for k in re.split(r"[,\s]+", raw) if k.strip()]
@@ -2066,6 +2125,7 @@ class Plugin(indigo.PluginBase):
 		self.logger.debug(f"Sending {keys} x{repeats} (delay {delay}s) → {device.name}")
 		self._sendKeys(device, keys, "key sequence", delay=delay, repeats=repeats)
 
+	@_deviceAction
 	def holdKey(self, pluginAction, device, callerWaitingForResult=None):
 		key = pluginAction.props.get("keyCode", "").strip().upper()
 		if not key:
@@ -2077,13 +2137,14 @@ class Plugin(indigo.PluginBase):
 			self.logger.error("Hold Key: seconds must be a number")
 			return
 		try:
-			self._getTransport(device).hold_key(key, seconds)
+			self._getTV(device).hold_key(key, seconds)
 		except Exception as e:
-			self.logger.error(f"Hold {key} failed on \"{device.name}\": {self._describeException(e)[0]}")
+			self._logActionError(device, "Press and Hold Key", e)
 
 	# ---------------------------------------------------------------------------
 	# changeChannel action — digits then Enter (HA's play_media channel)
 	# ---------------------------------------------------------------------------
+	@_deviceAction
 	def changeChannel(self, pluginAction, device, callerWaitingForResult=None):
 		channel = pluginAction.props.get("channel", "").strip()
 		if not re.fullmatch(r"\d+([-.]\d+)?", channel):
@@ -2100,6 +2161,7 @@ class Plugin(indigo.PluginBase):
 	# ---------------------------------------------------------------------------
 	# setVolume action — absolute level (0–100)
 	# ---------------------------------------------------------------------------
+	@_deviceAction
 	def setVolume(self, pluginAction, device, callerWaitingForResult=None):
 		try:
 			target = max(0, min(100, int(pluginAction.props.get("volumeLevel", 50))))
@@ -2133,6 +2195,7 @@ class Plugin(indigo.PluginBase):
 		if self._sendKeys(device, [key] * abs(diff), "set volume", delay=0.1):
 			device.updateStateOnServer("volumeLevel", target)
 
+	@_deviceAction
 	def setMute(self, pluginAction, device, callerWaitingForResult=None):
 		mode = pluginAction.props.get("muteMode", "toggle")
 		ip = device.pluginProps.get('ipaddress', '')
@@ -2154,6 +2217,7 @@ class Plugin(indigo.PluginBase):
 	# ---------------------------------------------------------------------------
 	# selectSource action — switch input via Samsung key code
 	# ---------------------------------------------------------------------------
+	@_deviceAction
 	def selectSource(self, pluginAction, device, callerWaitingForResult=None):
 		source_id = pluginAction.props.get("sourceId", "")
 		key = SOURCE_MAP.get(source_id)
@@ -2185,18 +2249,19 @@ class Plugin(indigo.PluginBase):
 			return app_name, COMMON_APPS[app_name], "DEEP_LINK"
 		return app_name, None, None
 
+	@_deviceAction
 	def launchApp(self, pluginAction, device, callerWaitingForResult=None):
 		device = indigo.devices[device.id]
 		app_name, app_id, app_type = self._resolveApp(device, pluginAction.props)
 		if not app_id:
 			self.logger.error(f"launchApp: unknown app '{app_name}'")
 			return
-		self.logger.info(f"Launching {app_name} on \"{device.name}\"")
 		try:
 			tv = self._getTV(device)
 		except Exception as e:
-			self.logger.error(f"Can't launch {app_name} on \"{device.name}\": {self._describeException(e)[0]}")
+			self._logActionError(device, "Launch App", e)
 			return
+		self.logger.info(f"Launching {app_name} on \"{device.name}\"")
 		try:
 			tv.launch_app(app_id, app_type)
 		except Exception as ws_err:
@@ -2221,6 +2286,7 @@ class Plugin(indigo.PluginBase):
 		names += [n for n in COMMON_APPS if n not in names]
 		return [(n, n) for n in names] + [(CUSTOM_APP, "Other (enter an app ID)…")]
 
+	@_deviceAction
 	def openBrowser(self, pluginAction, device, callerWaitingForResult=None):
 		url = pluginAction.props.get("url", "").strip()
 		if not url:
@@ -2230,8 +2296,9 @@ class Plugin(indigo.PluginBase):
 			self._getTV(device).open_browser(url)
 			self.logger.info(f"Opened {url} on \"{device.name}\"")
 		except Exception as e:
-			self.logger.error(f"Open URL failed on \"{device.name}\": {self._describeException(e)[0]}")
+			self._logActionError(device, "Open URL", e)
 
+	@_deviceAction
 	def sendText(self, pluginAction, device, callerWaitingForResult=None):
 		text = pluginAction.props.get("text", "")
 		if not text:
@@ -2240,7 +2307,7 @@ class Plugin(indigo.PluginBase):
 		try:
 			self._getTV(device).send_text(text)
 		except Exception as e:
-			self.logger.error(f"Send Text failed on \"{device.name}\" (a text field must be focused on the TV): {self._describeException(e)[0]}")
+			self._logActionError(device, "Send Text", e)
 
 	# ---------------------------------------------------------------------------
 	# Individual key methods (called by sendCommand dispatch)

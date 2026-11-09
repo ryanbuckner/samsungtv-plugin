@@ -14,8 +14,8 @@
 
 	<Field id="sepIpTracking" type="separator"/>
 	<Field id="ipTracking" type="checkbox" defaultValue="true">
-		<Label>Follow IP address changes:</Label>
-		<Description>If a TV gets a new IP address from your router, find it and update the device automatically</Description>
+		<Label>Detect IP address changes:</Label>
+		<Description>update new IPs to device automatically</Description>
 	</Field>
 	<Field id="ipSearchInterval" type="menu" defaultValue="15" visibleBindingId="ipTracking" visibleBindingValue="true" alwaysUseInDialogHeightCalc="true">
 		<Label>Look for a missing TV every:</Label>
