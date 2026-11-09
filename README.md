@@ -15,6 +15,19 @@ This plugin is not endorsed by or affiliated with Samsung.
 
 ---
 
+### What's New
+
+A reliability-focused update, with a few small usability improvements:
+
+- **Faster, smoother polling.** Checking what app is on-screen used to take a noticeable moment, especially with a slower TV — it now reports back almost instantly in the common case. If you don't need app detection at all, a new **Detect Running App** switch in the device setup lets you turn it off for the fastest polling possible.
+- **Volume and mute are now exact.** Setting a volume level lands on the exact number you asked for, and the Mute status shown in Indigo now matches what the TV is actually doing, instead of an occasional best guess.
+- **No more false error messages.** Turning on a TV that's already on (or off when it's already off) used to log a scary-looking error — it's now correctly treated as "nothing to do."
+- **Quicker, more responsive remote control.** Buttons on the remote respond faster and more reliably, especially when pressed in quick succession.
+- **Easier, safer setup.** The token filename is now optional — leave it blank and the plugin generates a unique one automatically, so two TVs set up with default settings can no longer accidentally interfere with each other. The IP address and port you enter are also checked for obvious typos before they're saved.
+- **A friendlier startup.** Indigo now starts up promptly even if a TV is temporarily offline or slow to respond on the network.
+
+---
+
 ### Features
 
 **Power**
@@ -64,7 +77,8 @@ Download `SamsungTV.indigoPlugin` and double-click it to install.
 1. Create a new device, type **Samsung TV**
 2. Enter the IP address of the TV
 3. Port defaults to `8002` — change only if needed
-4. Enter a unique filename for the token (e.g. `living-room-tv.txt`)
+4. Token filename is optional — leave it blank to auto-generate one from the IP address, or enter your own (e.g. `living-room-tv.txt`)
+5. **Detect Running App** is on by default — uncheck it for faster, leaner polling if you don't need Netflix/YouTube/etc detection
 
 > The TV must be powered on the first time you add it so the plugin can obtain a WebSocket token and discover the MAC address for Wake-on-LAN.
 

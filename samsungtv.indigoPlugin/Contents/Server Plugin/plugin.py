@@ -1,10 +1,16 @@
-#! /usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 ####################
 # Copyright (c) 2023 ryanbuckner
 # https://github.com/ryanbuckner/samsungtv-plugin/wiki
 
-import indigo
+try:
+	# This is primarily for IDEs — the indigo module is always injected into
+	# the global namespace by the host process when the plugin actually runs.
+	import indigo
+except ImportError:
+	pass
+
 import sys
 import datetime
 import samsungtvws
@@ -13,8 +19,8 @@ import os
 import urllib.request
 import xml.etree.ElementTree as ET
 import socket
-
-sys.path.append('../')
+import ipaddress as ipaddress_module
+import threading
 
 # Maps display names shown in the selectSource action to Samsung key codes.
 SOURCE_MAP = {
@@ -72,7 +78,15 @@ class Plugin(indigo.PluginBase):
 		)
 		self.path = self.pluginprefDirectory + "/"
 		self.timeout = 3.0
-		self.refresh_frequency = int(pluginPrefs.get('refresh_frequency', 30))
+		try:
+			self.refresh_frequency = int(pluginPrefs.get('refresh_frequency', 30))
+		except (TypeError, ValueError):
+			# A bad/blank stored value must not raise here: an exception in
+			# __init__ is unrecoverable (Indigo marks the plugin fatally
+			# suspended), where falling back and fixing it in Preferences later
+			# is simply an inconvenience.
+			self.refresh_frequency = 30
+			self.logger.debug(f"Invalid stored refresh_frequency {pluginPrefs.get('refresh_frequency')!r} — defaulting to 30s")
 
 	# ---------------------------------------------------------------------------
 	# Lifecycle
@@ -102,13 +116,17 @@ class Plugin(indigo.PluginBase):
 			if devId in indigo.devices:
 				dev = indigo.devices[devId]
 				try:
-					dev.updateStateOnServer("status", "offline")
+					dev.updateStateOnServer("status", "off")
 					dev.updateStateImageOnServer(indigo.kStateImageSel.SensorOff)
 				except Exception:
 					pass
+				self._closeTV(dev)
 
 	def prepareToSleep(self):
-		self.logger.debug("Preparing for sleep — TV WebSocket connections will be dropped")
+		self.logger.debug("Preparing for sleep — closing cached TV connections")
+		for devId in list(self.deviceList.keys()):
+			if devId in indigo.devices:
+				self._closeTV(indigo.devices[devId])
 
 	def wakeUp(self):
 		self.logger.debug("Waking from sleep — refreshing all TV states")
@@ -128,12 +146,46 @@ class Plugin(indigo.PluginBase):
 		device.stateListOrDisplayStateIdChanged()
 
 		if device.deviceTypeId == "televisions":
-			self.deviceList[device.id] = {"retryCount": 0, "lastUpdate": None}
+			# Merge into any existing entry instead of replacing it outright: if
+			# deviceStartComm() is ever re-entered while a previous poll is still
+			# running (and holding this entry's lock), replacing the dict would
+			# hand the new poll a fresh, uncontended lock — letting two polls
+			# race against the same physical TV at once.
+			entry = self.deviceList.setdefault(device.id, {})
+			entry["retryCount"] = 0
+			entry["lastUpdate"] = None
+			self._ensureTokenFile(device)
+			# Poll in the background instead of inline: Indigo calls deviceStartComm()
+			# serially for every device at launch, so a slow/offline TV here would
+			# block every other device (and the plugin) from starting promptly.
+			self._backgroundPoll(device)
+
+	def _ensureTokenFile(self, device):
+		"""Create the device's token file if it doesn't exist yet. Done here
+		(not in validateDeviceConfigUi) so cancelling the config dialog can't
+		leave an orphaned token file on disk as a side effect of validation."""
+		token_path = self._getTokenPath(device)
+		if not os.path.exists(token_path):
+			self.logger.debug(f"Token file at {token_path} does not exist, creating")
+			try:
+				with open(token_path, 'w'):
+					pass
+			except Exception as e:
+				self.logger.debug(f"Error creating token file for \"{device.name}\": {e}")
+
+	def _backgroundPoll(self, device):
+		threading.Thread(target=self._safePoll, args=(device,), daemon=True).start()
+
+	def _safePoll(self, device):
+		try:
 			self.updatedevicestates(device)
+		except Exception:
+			self.logger.exception(f"Error during background poll of {device.name}")
 
 	def deviceStopComm(self, device):
 		super().deviceStopComm(device)
 		self.logger.debug("Stopping device: " + device.name)
+		self._closeTV(device)
 		self.deviceList.pop(device.id, None)
 
 	# ---------------------------------------------------------------------------
@@ -158,30 +210,42 @@ class Plugin(indigo.PluginBase):
 	# ---------------------------------------------------------------------------
 	def validateDeviceConfigUi(self, valuesDict, typeId, device):
 		if typeId == 'televisions':
-			if not valuesDict.get('ipaddress', '').strip():
+			ip_str = valuesDict.get('ipaddress', '').strip()
+			if not ip_str:
 				errorsDict = indigo.Dict()
 				errorsDict['ipaddress'] = "IP Address is a required field"
 				return (False, valuesDict, errorsDict)
-
-			if not valuesDict.get('token', '').strip():
+			try:
+				ipaddress_module.ip_address(ip_str)
+			except ValueError:
 				errorsDict = indigo.Dict()
-				errorsDict['token'] = "Token file name is required"
+				errorsDict['ipaddress'] = "Enter a valid IP address (e.g. 192.168.1.50)"
 				return (False, valuesDict, errorsDict)
 
-			if not valuesDict.get('port', '').strip():
+			port_str = valuesDict.get('port', '').strip()
+			if not port_str:
 				errorsDict = indigo.Dict()
 				errorsDict['port'] = "Port is a required field"
 				return (False, valuesDict, errorsDict)
-
-		valuesDict['address'] = valuesDict['ipaddress']
-		file_path = self.path + valuesDict['token']
-		if not os.path.exists(file_path):
-			self.logger.debug("Token at " + file_path + " does not exist, creating")
 			try:
-				with open(file_path, 'w'):
-					pass
-			except Exception as e:
-				self.logger.debug(f"Error creating token file: {e}")
+				if not (1 <= int(port_str) <= 65535):
+					raise ValueError
+			except ValueError:
+				errorsDict = indigo.Dict()
+				errorsDict['port'] = "Port must be a number between 1 and 65535"
+				return (False, valuesDict, errorsDict)
+
+			valuesDict['address'] = ip_str
+
+			# Sanitize the token file name: strip any path component so a stray
+			# separator (or "..") can't make samsungtvws read/write outside the
+			# plugin's own prefs folder. Default it per-device, keyed off the IP,
+			# so two TVs created with the stock default don't silently share (and
+			# clobber) the same token file.
+			token_name = os.path.basename(valuesDict.get('token', '').strip())
+			if not token_name:
+				token_name = f"tv-token-{ip_str.replace('.', '-')}.txt"
+			valuesDict['token'] = token_name
 
 		return (True, valuesDict)
 
@@ -322,12 +386,14 @@ class Plugin(indigo.PluginBase):
 			self.logger.info("No Samsung TVs found. Make sure TVs are powered on and on the same network segment.")
 			return
 
-		# Confirm each candidate is actually a Samsung TV by querying its REST API
+		# Confirm each candidate is actually a Samsung TV by querying its REST API.
+		# rest_device_info() is unauthenticated, so the plain REST client is used
+		# directly here — no token file needed (and none left behind on disk).
 		found = {}
 		for ip in candidate_ips:
 			try:
-				tv   = samsungtvws.SamsungTVWS(host=ip, port=8002, token_file=self.path + "discovery-temp.txt", timeout=2.0)
-				info = tv.rest_device_info().get('device', {})
+				rest = samsungtvws.rest.SamsungTVRest(host=ip, port=8002, timeout=2.0)
+				info = rest.rest_device_info().get('device', {})
 				found[ip] = info
 				self.logger.debug(f"Validated Samsung TV at {ip}: {info.get('modelName', 'unknown')}")
 			except Exception:
@@ -354,32 +420,85 @@ class Plugin(indigo.PluginBase):
 			self.logger.info("{0:-^130}".format(""))
 		self.logger.info("{0:=^130}".format(""))
 
-	# ---------------------------------------------------------------------------
-	# TV connection helper
-	# ---------------------------------------------------------------------------
-	def _getTV(self, device):
-		ipaddress  = device.pluginProps['ipaddress']
-		token_file = self.path + device.pluginProps['token']
+	def _getPort(self, device):
+		"""Returns the configured port for a device, falling back to 8002 (the
+		default for Tizen TVs with token-based TLS auth) if unset or invalid."""
 		try:
-			return samsungtvws.SamsungTVWS(
-				host=ipaddress, port=8002,
-				token_file=token_file, timeout=self.timeout
-			)
-		except Exception:
-			self.logger.debug(f"Failed to create TV connection for {device.name}")
-			return None
+			port = int(device.pluginProps.get('port', 8002) or 8002)
+			return port if 1 <= port <= 65535 else 8002
+		except (TypeError, ValueError):
+			return 8002
+
+	def _getTokenPath(self, device):
+		"""Returns the full path to a device's token file, re-sanitizing the
+		stored token name every time (not just at ConfigUI validation time).
+		pluginProps can be set by things that bypass validateDeviceConfigUi
+		entirely — a script calling replacePluginPropsOnServer(), the Indigo
+		HTTP/WS API, device import/export — so trusting it blindly here would
+		let a value like "../../../Library/something" read/write files outside
+		the plugin's own prefs folder."""
+		token_name = os.path.basename(device.pluginProps.get('token', '').strip())
+		if not token_name:
+			ip_str = device.pluginProps.get('ipaddress', '').strip() or "unknown"
+			token_name = f"tv-token-{ip_str.replace('.', '-')}.txt"
+		return self.path + token_name
+
+	# ---------------------------------------------------------------------------
+	# TV connection helper — caches one SamsungTVWS object per device so repeated
+	# key sends reuse the same underlying WebSocket instead of paying a fresh
+	# handshake (and possible re-auth prompt on the TV) for every single button.
+	# ---------------------------------------------------------------------------
+	def _getTV(self, device, forceNew=False):
+		entry = self.deviceList.setdefault(device.id, {})
+		if forceNew:
+			self._closeTV(device)
+		if entry.get('tv') is None:
+			ipaddress  = device.pluginProps['ipaddress']
+			token_file = self._getTokenPath(device)
+			try:
+				entry['tv'] = samsungtvws.SamsungTVWS(
+					host=ipaddress, port=self._getPort(device),
+					token_file=token_file, timeout=self.timeout
+				)
+			except Exception:
+				self.logger.debug(f"Failed to create TV connection for {device.name}")
+				entry['tv'] = None
+		return entry.get('tv')
+
+	def _closeTV(self, device):
+		entry = self.deviceList.get(device.id)
+		if not entry:
+			return
+		tv = entry.get('tv')
+		if tv is not None:
+			try:
+				tv.close()
+			except Exception:
+				pass
+			entry['tv'] = None
 
 	# ---------------------------------------------------------------------------
 	# State polling
 	# ---------------------------------------------------------------------------
 	def updatedevicestates(self, device):
+		# Serialize polls per device: this can be entered concurrently from
+		# runConcurrentThread, wakeUp(), toggleDetailedDebugging(), the
+		# refresh_tv_data action, and the background poll kicked off by
+		# deviceStartComm() — without a lock, two overlapping polls would race
+		# on the same TV connection and on replacePluginPropsOnServer() below.
+		entry = self.deviceList.setdefault(device.id, {})
+		lock = entry.setdefault('lock', threading.Lock())
+		with lock:
+			self._pollDeviceStates(device)
+
+	def _pollDeviceStates(self, device):
 		ipaddress  = device.pluginProps['ipaddress']
-		token_file = self.path + device.pluginProps['token']
+		token_file = self._getTokenPath(device)
 
 		self.logger.debug(f"Polling {device.name} ({device.id})")
 
 		try:
-			tv   = samsungtvws.SamsungTVWS(host=ipaddress, port=8002, token_file=token_file, timeout=self.timeout)
+			tv   = samsungtvws.SamsungTVWS(host=ipaddress, port=self._getPort(device), token_file=token_file, timeout=self.timeout)
 			info = tv.rest_device_info()
 			tvState = info['device']['PowerState'].lower()
 			self.logger.debug(f"Power state of {device.name}: {tvState}")
@@ -407,12 +526,16 @@ class Plugin(indigo.PluginBase):
 
 		# Detect currently running app and read volume — only meaningful when the TV is on
 		current_app = ""
-		if tvState == 'on':
-			current_app = self._getCurrentApp(tv)
+		if tvState == 'on' and device.pluginProps.get('detectApp', True):
+			current_app = self._getCurrentApp(ipaddress, device)
 
 		volume = self._getVolumeUPnP(ipaddress) if tvState == 'on' else None
 		if volume is not None:
 			self.logger.debug(f"Volume for {device.name}: {volume}")
+
+		muted = self._getMuteUPnP(ipaddress) if tvState == 'on' else None
+		if muted is not None:
+			self.logger.debug(f"Mute state for {device.name}: {muted}")
 
 		# If an app is running the TV is on the Smart Hub, not a physical input.
 		# Only overwrite currentSource when we can determine it; otherwise leave it
@@ -440,6 +563,8 @@ class Plugin(indigo.PluginBase):
 		]
 		if volume is not None:
 			device_states.append({'key': 'volumeLevel', 'value': volume})
+		if muted is not None:
+			device_states.append({'key': 'isMuted', 'value': muted})
 
 		if self.detailedDebug:
 			self.logger.info(f"--- States for {device.name} ---")
@@ -456,42 +581,60 @@ class Plugin(indigo.PluginBase):
 			self.deviceList[device.id]['lastUpdate'] = str(datetime.datetime.now())
 			self.deviceList[device.id]['retryCount'] = 0
 
-	def _getCurrentApp(self, tv):
+	def _getCurrentApp(self, ip, device):
 		"""Poll the TV for the foreground app from COMMON_APPS. Returns app name or empty string.
 
-		Two-pass strategy: visible (foreground) takes priority over running (background/cached)
-		so that an app like YouTube sitting in the background doesn't shadow the active app.
+		Short-circuits on the first visible app instead of always querying every entry in
+		COMMON_APPS — in the common case (same app still foreground since the last poll)
+		this costs one REST call instead of up to len(COMMON_APPS). Each probe also uses its
+		own short timeout, independent of self.timeout, so a slow/unresponsive TV can't turn
+		this into len(COMMON_APPS) * self.timeout seconds on every single poll.
+
+		Two-pass fallback: visible (foreground) takes priority over running (background/
+		cached) so that an app like YouTube sitting in the background doesn't shadow the
+		active app.
 		"""
-		statuses = {}
-		for app_name, app_id in COMMON_APPS.items():
+		entry = self.deviceList.setdefault(device.id, {})
+		last_app = entry.get('lastApp')
+
+		# Probe the last known app first so an unchanged foreground app resolves in one call.
+		ordered_names = list(COMMON_APPS.keys())
+		if last_app in COMMON_APPS:
+			ordered_names.remove(last_app)
+			ordered_names.insert(0, last_app)
+
+		probe_timeout = min(self.timeout, 1.0)
+		rest = samsungtvws.rest.SamsungTVRest(host=ip, port=self._getPort(device), timeout=probe_timeout)
+
+		running_fallback = ""
+		for app_name in ordered_names:
 			try:
-				statuses[app_name] = tv.rest_app_status(app_id)
+				status = rest.rest_app_status(COMMON_APPS[app_name])
 			except Exception:
-				statuses[app_name] = None
-
-		# Pass 1: visible means on-screen right now
-		for app_name, status in statuses.items():
-			if status and status.get('visible'):
+				continue
+			if not status:
+				continue
+			if status.get('visible'):
+				entry['lastApp'] = app_name
 				return app_name
+			if not running_fallback and status.get('running'):
+				running_fallback = app_name
 
-		# Pass 2: running but not necessarily visible (background/suspended)
-		for app_name, status in statuses.items():
-			if status and status.get('running'):
-				return app_name
+		entry['lastApp'] = running_fallback or None
+		return running_fallback
 
-		return ""
-
-	def _getVolumeUPnP(self, ip):
-		"""Read current volume from the TV via UPnP RenderingControl (port 9197).
-		Returns an int 0-100, or None if the TV does not respond."""
+	def _upnpAction(self, ip, action, extra_body=""):
+		"""Call a UPnP RenderingControl:1 action on the TV (port 9197).
+		Returns the parsed XML response root, or None on failure."""
 		soap = (
 			'<?xml version="1.0" encoding="utf-8"?>'
 			'<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"'
 			' xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
 			'<s:Body>'
-			'<u:GetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">'
+			f'<u:{action} xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">'
 			'<InstanceID>0</InstanceID><Channel>Master</Channel>'
-			'</u:GetVolume>'
+			f'{extra_body}'
+			f'</u:{action}>'
 			'</s:Body>'
 			'</s:Envelope>'
 		)
@@ -501,18 +644,46 @@ class Plugin(indigo.PluginBase):
 				data=soap.encode('utf-8'),
 				headers={
 					'Content-Type': 'text/xml; charset="utf-8"',
-					'SOAPAction': '"urn:schemas-upnp-org:service:RenderingControl:1#GetVolume"',
+					'SOAPAction': f'"urn:schemas-upnp-org:service:RenderingControl:1#{action}"',
 				},
 				method='POST'
 			)
 			with urllib.request.urlopen(req, timeout=2) as resp:
-				root = ET.fromstring(resp.read())
-				el = root.find('.//CurrentVolume')
-				if el is not None:
-					return int(el.text)
+				return ET.fromstring(resp.read())
 		except Exception:
-			pass
-		return None
+			return None
+
+	def _getVolumeUPnP(self, ip):
+		"""Read current volume from the TV via UPnP RenderingControl.
+		Returns an int 0-100, or None if the TV does not respond."""
+		root = self._upnpAction(ip, "GetVolume")
+		if root is None:
+			return None
+		el = root.find('.//CurrentVolume')
+		return int(el.text) if el is not None else None
+
+	def _setVolumeUPnP(self, ip, volume):
+		"""Set an absolute volume (0-100) via UPnP RenderingControl.
+		Returns True if the TV acknowledged the request."""
+		root = self._upnpAction(ip, "SetVolume", f"<DesiredVolume>{int(volume)}</DesiredVolume>")
+		return root is not None
+
+	def _getMuteUPnP(self, ip):
+		"""Read current mute state via UPnP RenderingControl.
+		Returns True/False, or None if the TV does not respond."""
+		root = self._upnpAction(ip, "GetMute")
+		if root is None:
+			return None
+		el = root.find('.//CurrentMute')
+		if el is None:
+			return None
+		return el.text in ("1", "true", "True")
+
+	def _setMuteUPnP(self, ip, muted):
+		"""Set mute state via UPnP RenderingControl.
+		Returns True if the TV acknowledged the request."""
+		root = self._upnpAction(ip, "SetMute", f"<DesiredMute>{1 if muted else 0}</DesiredMute>")
+		return root is not None
 
 	def refresh_tv_data(self, pluginAction, device):
 		self.updatedevicestates(device)
@@ -522,65 +693,41 @@ class Plugin(indigo.PluginBase):
 	# ---------------------------------------------------------------------------
 	def actionControlDevice(self, action, dev):
 		if action.deviceAction == indigo.kDeviceAction.TurnOn:
-			send_success = self.turnOnTV(dev)
-			if send_success:
-				self.logger.info(f"sent \"{dev.name}\" on")
-				dev.updateStateOnServer("onOffState", True)
-				dev.updateStateOnServer("status", "on")
-			else:
-				self.logger.error(f"send \"{dev.name}\" on failed")
-				self.logger.info(f"Verify the IP address for \"{dev.name}\" ({dev.pluginProps.get('ipaddress', 'unknown')}) has not changed and remote permissions have been allowed")
-
+			self._reportPowerResult(dev, self.turnOnTV(dev), turning_on=True)
 		elif action.deviceAction == indigo.kDeviceAction.TurnOff:
-			send_success = self.turnOffTV(dev)
-			if send_success:
-				self.logger.info(f"sent \"{dev.name}\" off")
-				dev.updateStateOnServer("onOffState", False)
-				dev.updateStateOnServer("status", "off")
-			else:
-				self.logger.error(f"send \"{dev.name}\" off failed")
+			self._reportPowerResult(dev, self.turnOffTV(dev), turning_on=False)
 
 	# ---------------------------------------------------------------------------
 	# Power actions
 	# ---------------------------------------------------------------------------
 	def toggleTVPower(self, pluginAction, device):
 		if device.onState:
-			send_success = self.turnOffTV(device)
-			if send_success:
-				self.logger.info(f"sent \"{device.name}\" off")
-				device.updateStateOnServer("onOffState", False)
-				device.updateStateOnServer("status", "off")
-			else:
-				self.logger.error(f"send \"{device.name}\" off failed")
+			self._reportPowerResult(device, self.turnOffTV(device), turning_on=False)
 		else:
-			send_success = self.turnOnTV(device)
-			if send_success:
-				self.logger.info(f"sent \"{device.name}\" on")
-				device.updateStateOnServer("onOffState", True)
-				device.updateStateOnServer("status", "on")
-			else:
-				self.logger.error(f"send \"{device.name}\" on failed")
-				self.logger.info(f"Verify the IP address for \"{device.name}\" ({device.pluginProps.get('ipaddress', 'unknown')}) has not changed and remote permissions have been allowed")
+			self._reportPowerResult(device, self.turnOnTV(device), turning_on=True)
 
 	def turnOnTVAction(self, pluginAction, device, callerWaitingForResult=None):
-		send_success = self.turnOnTV(device)
-		if send_success:
-			self.logger.info(f"sent \"{device.name}\" on")
-			device.updateStateOnServer("onOffState", True)
-			device.updateStateOnServer("status", "on")
-		else:
-			self.logger.error(f"send \"{device.name}\" on failed")
-			self.logger.info(f"Verify the IP address for \"{device.name}\" ({device.pluginProps.get('ipaddress', 'unknown')}) has not changed and remote permissions have been allowed")
+		self._reportPowerResult(device, self.turnOnTV(device), turning_on=True)
 
 	def turnOffTVAction(self, pluginAction, device, callerWaitingForResult=None):
-		send_success = self.turnOffTV(device)
-		if send_success:
-			self.logger.info(f"sent \"{device.name}\" off")
-			device.updateStateOnServer("onOffState", False)
-			device.updateStateOnServer("status", "off")
-		else:
-			self.logger.error(f"send \"{device.name}\" off failed")
-			self.logger.info(f"Verify the IP address for \"{device.name}\" ({device.pluginProps.get('ipaddress', 'unknown')}) has not changed and remote permissions have been allowed")
+		self._reportPowerResult(device, self.turnOffTV(device), turning_on=False)
+
+	def _reportPowerResult(self, device, result, turning_on):
+		"""Log/update state for the outcome of turnOnTV()/turnOffTV().
+
+		result is one of "sent" (command dispatched), "already" (device was
+		already in the desired state — a no-op, not a failure), or "failed".
+		"""
+		verb = "on" if turning_on else "off"
+		if result == "sent":
+			self.logger.info(f"sent \"{device.name}\" {verb}")
+			device.updateStateOnServer("onOffState", turning_on)
+			device.updateStateOnServer("status", "on" if turning_on else "off")
+		elif result == "failed":
+			self.logger.error(f"send \"{device.name}\" {verb} failed")
+			if turning_on:
+				self.logger.info(f"Verify the IP address for \"{device.name}\" ({device.pluginProps.get('ipaddress', 'unknown')}) has not changed and remote permissions have been allowed")
+		# "already": turnOnTV()/turnOffTV() already logged an info line — nothing more to do.
 
 	def volumeUpAction(self, pluginAction, device, callerWaitingForResult=None):
 		self._volumeUp(device)
@@ -589,37 +736,38 @@ class Plugin(indigo.PluginBase):
 		self._volumeDown(device)
 
 	def turnOnTV(self, device):
+		"""Returns "sent", "already" (already on — not a failure), or "failed"."""
+		if device.states.get('status') == "on":
+			self.logger.info(f"\"{device.name}\" is already on")
+			return "already"
 		macaddress = device.pluginProps.get('macaddress', '') or device.states.get('macaddress', '')
 		if not macaddress:
 			self.logger.error(f"\"{device.name}\": no MAC address stored — turn the TV on manually, wait for a poll cycle, then try again")
-			return False
-		if device.states.get('status') == "on":
-			self.logger.info(f"\"{device.name}\" is already on")
-			return False
+			return "failed"
 		self.logger.info(f"Sending WOL magic packet to {macaddress} for \"{device.name}\"")
 		try:
 			wakeonlan.send_magic_packet(macaddress)
-			return True
+			return "sent"
 		except Exception as m:
 			self.logger.error(f"WOL for \"{device.name}\" failed: {m}")
-			return False
+			return "failed"
 
 	def turnOffTV(self, device):
+		"""Returns "sent", "already" (already off — not a failure), or "failed"."""
 		if device.states.get('status') != "on":
 			self.logger.info(f"\"{device.name}\" is not on")
-			return False
+			return "already"
 		self.logger.info(f"Sending power key to \"{device.name}\"")
+		tv = self._getTV(device)
+		if not tv:
+			self.logger.error(f"Power off for \"{device.name}\" failed: cannot connect")
+			return "failed"
 		try:
-			tv = samsungtvws.SamsungTVWS(
-				host=device.pluginProps['ipaddress'], port=8002,
-				token_file=self.path + device.pluginProps['token'],
-				timeout=self.timeout
-			)
 			tv.shortcuts().power()
-			return True
+			return "sent"
 		except Exception as m:
 			self.logger.error(f"Power off for \"{device.name}\" failed: {m}")
-			return False
+			return "failed"
 
 	# ---------------------------------------------------------------------------
 	# Key send helper — single point for all key dispatch
@@ -633,8 +781,19 @@ class Plugin(indigo.PluginBase):
 			tv.send_key(key)
 			return True
 		except Exception as m:
-			self.logger.error(f"{label} failed on \"{device.name}\": {m}")
-			return False
+			# The cached connection may have gone stale (TV rebooted, standby, etc).
+			# Reconnect once and retry before giving up.
+			self.logger.debug(f"{label} failed on \"{device.name}\" ({m}) — reconnecting and retrying")
+			tv = self._getTV(device, forceNew=True)
+			if not tv:
+				self.logger.error(f"Cannot reach \"{device.name}\" to send {label}")
+				return False
+			try:
+				tv.send_key(key)
+				return True
+			except Exception as m2:
+				self.logger.error(f"{label} failed on \"{device.name}\": {m2}")
+				return False
 
 	# ---------------------------------------------------------------------------
 	# sendCommand action — remote button dispatch
@@ -696,6 +855,16 @@ class Plugin(indigo.PluginBase):
 			self.logger.error("setVolume: invalid volume level")
 			return
 
+		ipaddress = device.pluginProps.get('ipaddress', '')
+
+		# Preferred path: UPnP SetVolume is a single absolute request — no risk of
+		# dropped key presses or racing the device's actual volume.
+		if ipaddress and self._setVolumeUPnP(ipaddress, target):
+			self.logger.debug(f"Volume set to {target} via UPnP on \"{device.name}\"")
+			device.updateStateOnServer("volumeLevel", target)
+			return
+
+		# Fallback: step via remote keys when UPnP control isn't available on this TV.
 		current = device.states.get("volumeLevel", 50)
 		if not isinstance(current, int):
 			current = 50
@@ -708,7 +877,7 @@ class Plugin(indigo.PluginBase):
 		if not tv:
 			return
 
-		self.logger.debug(f"Volume {current} → {target} ({diff:+d} steps) on \"{device.name}\"")
+		self.logger.debug(f"UPnP volume control unavailable — stepping {current} → {target} ({diff:+d}) via remote keys on \"{device.name}\"")
 		try:
 			key  = "KEY_VOLUP" if diff > 0 else "KEY_VOLDOWN"
 			for _ in range(abs(diff)):
@@ -763,7 +932,13 @@ class Plugin(indigo.PluginBase):
 	# ---------------------------------------------------------------------------
 	def _mute(self, device):
 		if self._sendKey(device, "KEY_MUTE", "Mute"):
-			device.updateStateOnServer("isMuted", not device.states.get("isMuted", False))
+			ipaddress = device.pluginProps.get('ipaddress', '')
+			muted = self._getMuteUPnP(ipaddress) if ipaddress else None
+			if muted is None:
+				# UPnP didn't answer — fall back to the old blind-toggle guess;
+				# the next poll will correct it from the TV's real state anyway.
+				muted = not device.states.get("isMuted", False)
+			device.updateStateOnServer("isMuted", muted)
 
 	def _volumeUp(self, device):
 		if self._sendKey(device, "KEY_VOLUP", "Volume Up"):
