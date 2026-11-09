@@ -199,4 +199,3 @@ plugin.executeAction("setVolume",    deviceId=tv.id, props={"volumeLevel": "20"}
 
 Still stuck? Set **Debug Logging** to *Debug* in the plugin settings, reproduce the problem, and post the event log on the [Indigo forum](https://forums.indigodomo.com/viewforum.php?f=363).
 
-More information on the [GitHub Wiki](https://github.com/ryanbuckner/samsungtv-plugin/wiki).
