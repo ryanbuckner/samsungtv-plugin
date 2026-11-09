@@ -560,12 +560,21 @@ class Plugin(indigo.PluginBase):
 			entry['retryCount'] = retry_count + 1
 			return
 
-		# Clear any previous error badge, and announce recovery if this TV was
-		# previously unreachable (so fixing a bad IP address is visible too).
+		# Clear any previous error badge, and announce success the same way
+		# failures are announced — a successful poll was previously silent
+		# (debug-only), so there was no positive confirmation in the log that
+		# a TV actually connected on a given reload, only an absence of errors.
 		device.setErrorStateOnServer(None)
 		entry = self.deviceList.setdefault(device.id, {})
 		if entry.get('retryCount', 0) > 0:
 			self.logger.info(f"\"{device.name}\": reachable again at {ipaddress}")
+		elif not entry.get('everConnected'):
+			# First successful poll since this device started (e.g. right
+			# after a plugin reload) — confirm it loudly once, then go quiet
+			# for routine repeat successes so the log isn't spammed every
+			# refresh_frequency seconds for a TV that's working fine.
+			self.logger.info(f"\"{device.name}\": connected successfully at {ipaddress}")
+		entry['everConnected'] = True
 
 		# Persist MAC into pluginProps so WOL works even before first successful poll
 		mac = info['device'].get('wifiMac', '')
