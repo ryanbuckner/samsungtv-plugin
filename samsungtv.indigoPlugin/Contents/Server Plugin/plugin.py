@@ -900,8 +900,13 @@ class Plugin(indigo.PluginBase):
 		self.logger.debug(f"UPnP volume control unavailable — stepping {current} → {target} ({diff:+d}) via remote keys on \"{device.name}\"")
 		try:
 			key  = "KEY_VOLUP" if diff > 0 else "KEY_VOLDOWN"
+			# samsungtvws defaults to a 1-second pause after every send_key() —
+			# fine for a single button press, but this loop can run up to 100
+			# times (a full 0-100 jump), so left at the default it would block
+			# this action for up to ~100 seconds. 100ms is still comfortably
+			# enough for the TV to register each discrete step.
 			for _ in range(abs(diff)):
-				tv.send_key(key)
+				tv.send_key(key, key_press_delay=0.1)
 			device.updateStateOnServer("volumeLevel", target)
 		except Exception as m:
 			self.logger.error(f"setVolume failed on \"{device.name}\": {m}")
