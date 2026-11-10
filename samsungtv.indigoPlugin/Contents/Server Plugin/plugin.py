@@ -474,6 +474,9 @@ class Plugin(indigo.PluginBase):
 			self.refresh_frequency = int(valuesDict.get('refresh_frequency', 30))
 			self._applyLogLevel(self._storedLogLevel(valuesDict))
 			self._applyIpTrackingPrefs(valuesDict)
+			self._say("Plugin preferences saved")
+		else:
+			self._say("Plugin preferences not saved (cancelled)", logging.WARNING)
 
 	def _applyIpTrackingPrefs(self, prefs):
 		value = prefs.get('ipTracking', True)
