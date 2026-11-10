@@ -95,6 +95,20 @@ UPNP_PORT = 9197
 # HA's power_off_in_progress window.
 POWER_OFF_GRACE = 25
 
+# Event Logging Level (Plugin Config), the same scale Indigo's own plugins use.
+LOG_DETAILED = getattr(logging, "THREADDEBUG", 5)
+LOG_LEVEL_NAMES = {
+	LOG_DETAILED:     "Detailed Debugging Messages",
+	logging.DEBUG:    "Debugging Messages",
+	logging.INFO:     "Informational Messages",
+	logging.WARNING:  "Warning Messages",
+	logging.ERROR:    "Error Messages",
+	logging.CRITICAL: "Critical Errors Only",
+}
+# Pre-2026.1.3 "Debug Logging" menu. Its "Critical" choice actually showed
+# everything but debug; map it to errors, which is what the label promised.
+LEGACY_LOG_LEVELS = {"off": logging.ERROR, "debug": logging.DEBUG, "detailed": LOG_DETAILED}
+
 # Device props that really change how the plugin talks to a TV. Indigo
 # restarts a device's comm whenever didDeviceCommPropertyChange() says so;
 # its default compares *every* plugin prop, which made each internal write
@@ -168,9 +182,7 @@ class Plugin(indigo.PluginBase):
 	# ---------------------------------------------------------------------------
 	def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs):
 		super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
-		level = pluginPrefs.get("debugLevel", "off")
-		self.debug         = level in ("debug", "detailed")
-		self.detailedDebug = level == "detailed"
+		self._applyLogLevel(self._storedLogLevel(pluginPrefs))
 		self._routeLibraryLogging()
 		# dict keyed by device.id → per-device runtime state (locks, cached
 		# transport, retry counters, power-off grace window, ...)
@@ -234,7 +246,7 @@ class Plugin(indigo.PluginBase):
 			self.logger.error("Error accessing or creating tokens folder")
 
 	def shutdown(self):
-		self.logger.info("Samsung TV Plugin shutting down")
+		self.logger.debug("Samsung TV Plugin shutting down")
 		for devId in list(self.deviceList.keys()):
 			if devId in indigo.devices:
 				dev = indigo.devices[devId]
@@ -368,7 +380,7 @@ class Plugin(indigo.PluginBase):
 			try:
 				ipaddress_module.ip_address(ip_str)
 			except ValueError:
-				self.logger.error(f"Samsung TV device config: \"{ip_str}\" is not a valid IP address")
+				self.logger.debug(f"Samsung TV device config: \"{ip_str}\" is not a valid IP address")
 				errorsDict = indigo.Dict()
 				errorsDict['ipaddress'] = "Enter a valid IP address (e.g. 192.168.1.50)"
 				return (False, valuesDict, errorsDict)
@@ -378,7 +390,7 @@ class Plugin(indigo.PluginBase):
 				if not (1 <= int(port_str) <= 65535):
 					raise ValueError
 			except ValueError:
-				self.logger.error(f"Samsung TV device config: \"{port_str}\" is not a valid port (must be 1-65535)")
+				self.logger.debug(f"Samsung TV device config: \"{port_str}\" is not a valid port (must be 1-65535)")
 				errorsDict = indigo.Dict()
 				errorsDict['port'] = "Port must be a number between 1 and 65535"
 				return (False, valuesDict, errorsDict)
@@ -460,7 +472,7 @@ class Plugin(indigo.PluginBase):
 	def closedPrefsConfigUi(self, valuesDict, userCancelled):
 		if not userCancelled:
 			self.refresh_frequency = int(valuesDict.get('refresh_frequency', 30))
-			self._applyDebugLevel(valuesDict.get('debugLevel', 'off'))
+			self._applyLogLevel(self._storedLogLevel(valuesDict))
 			self._applyIpTrackingPrefs(valuesDict)
 
 	def _applyIpTrackingPrefs(self, prefs):
@@ -487,7 +499,7 @@ class Plugin(indigo.PluginBase):
 		return valuesDict
 
 	def menu_callback(self, valuesDict, *args, **kwargs):
-		self.logger.debug(f"Menu callback: {valuesDict}")
+		self.logger.log(LOG_DETAILED, f"Menu callback: {valuesDict}")
 		return valuesDict
 
 	# ---------------------------------------------------------------------------
@@ -682,7 +694,7 @@ class Plugin(indigo.PluginBase):
 	# Debug helpers
 	# ---------------------------------------------------------------------------
 	def _routeLibraryLogging(self):
-		"""Make third-party library logging obey the plugin's Debug Logging
+		"""Make third-party library logging obey the plugin's Event Logging Level
 		preference.
 
 		Indigo only attaches its event-log handler to this plugin's "Plugin"
@@ -694,7 +706,7 @@ class Plugin(indigo.PluginBase):
 		itself at INFO.
 
 		Forward them into the plugin's logger instead:
-		  - library WARNING/ERROR → DEBUG: shown only when Debug Logging is on.
+		  - library WARNING/ERROR → DEBUG: shown only at Debugging Messages or below.
 		    The plugin already reports every failure itself in plain language.
 		  - everything below WARNING → THREADDEBUG: the plugin's own log file
 		    only, never the Indigo event log.
@@ -735,31 +747,62 @@ class Plugin(indigo.PluginBase):
 		except Exception:
 			pass
 
-	def _applyDebugLevel(self, level):
-		self.debug         = level in ("debug", "detailed")
-		self.detailedDebug = level == "detailed"
-		self.pluginPrefs["debugLevel"] = level
+	# ---------------------------------------------------------------------------
+	# Event log level
+	# ---------------------------------------------------------------------------
+	@staticmethod
+	def _storedLogLevel(prefs):
+		"""The Event Logging Level pref as an int. Older versions stored a
+		three-way "debugLevel" (off/debug/detailed); map it across once."""
+		value = prefs.get("logLevel")
+		if value in (None, ""):
+			value = LEGACY_LOG_LEVELS.get(prefs.get("debugLevel"), logging.INFO)
+		try:
+			value = int(value)
+		except (TypeError, ValueError):
+			return logging.INFO
+		return value if value in LOG_LEVEL_NAMES else logging.INFO
+
+	def _applyLogLevel(self, level):
+		"""Filter the Indigo event log at `level`. The plugin's own log file
+		keeps everything regardless."""
+		# Setting self.debug resets the event log handler's level, so it has
+		# to come first.
+		self.debug         = level <= logging.DEBUG
+		self.detailedDebug = level <= LOG_DETAILED
+		self.logLevel      = level
+		self.indigo_log_handler.setLevel(level)
+		self.pluginPrefs["logLevel"] = str(level)
+
+	def _say(self, msg, level=logging.INFO):
+		"""Output the user explicitly asked for (menu commands). Shown at
+		every Event Logging Level: through the normal logger when the level
+		allows it, otherwise written straight to the event log (and to the
+		plugin log file only via the logger, so it never appears twice)."""
+		if self.logLevel <= level:
+			self.logger.log(level, msg)
+		else:
+			indigo.server.log(msg, type=self.pluginDisplayName, isError=level >= logging.ERROR)
+			self.logger.log(LOG_DETAILED, msg)
 
 	# ---------------------------------------------------------------------------
 	# Debug toggles (Plugins menu)
 	# ---------------------------------------------------------------------------
 	def toggleDebugging(self):
-		current = self.pluginPrefs.get("debugLevel", "off")
-		if current == "off":
-			self._applyDebugLevel("debug")
-			self.logger.info("Debug logging turned on")
+		if self.logLevel <= logging.DEBUG:
+			self._applyLogLevel(logging.INFO)
+			self._say("Event logging level set to Informational Messages")
 		else:
-			self._applyDebugLevel("off")
-			self.logger.info("Debug logging turned off")
+			self._applyLogLevel(logging.DEBUG)
+			self._say("Event logging level set to Debugging Messages")
 
 	def toggleDetailedDebugging(self):
-		current = self.pluginPrefs.get("debugLevel", "off")
-		if current == "detailed":
-			self._applyDebugLevel("debug")
-			self.logger.info("Detailed state logging turned off (debug logging still on)")
+		if self.logLevel <= LOG_DETAILED:
+			self._applyLogLevel(logging.DEBUG)
+			self._say("Event logging level set to Debugging Messages")
 		else:
-			self._applyDebugLevel("detailed")
-			self.logger.info("Detailed state logging turned on — polling all TVs now...")
+			self._applyLogLevel(LOG_DETAILED)
+			self._say("Event logging level set to Detailed Debugging Messages — polling all TVs now...")
 			for devId in list(self.deviceList.keys()):
 				if devId in indigo.devices:
 					try:
@@ -770,25 +813,25 @@ class Plugin(indigo.PluginBase):
 	def listDeviceInfo(self):
 		devices = [d for d in indigo.devices.iter("self") if d.deviceTypeId == "televisions"]
 		if not devices:
-			self.logger.info("No Samsung TV devices are configured")
+			self._say("No Samsung TV devices are configured")
 			return
-		self.logger.info("{0:=^130}".format(" Samsung TV Device Info "))
+		self._say("{0:=^130}".format(" Samsung TV Device Info "))
 		for dev in devices:
 			props = dev.pluginProps
 			method = self._effectiveMethod(dev)
-			self.logger.info("{0:<20} {1}".format("Device name:",  dev.name))
-			self.logger.info("{0:<20} {1}".format("IP address:",   props.get('ipaddress', 'not set')))
-			self.logger.info("{0:<20} {1}".format("Model:",        props.get('model', '') or dev.states.get('model', '') or 'unknown'))
-			self.logger.info("{0:<20} {1}".format("Protocol:",     METHOD_LABELS.get(method, "not detected yet") + (" (forced)" if props.get('method', METHOD_AUTO) != METHOD_AUTO else "")))
+			self._say("{0:<20} {1}".format("Device name:",  dev.name))
+			self._say("{0:<20} {1}".format("IP address:",   props.get('ipaddress', 'not set')))
+			self._say("{0:<20} {1}".format("Model:",        props.get('model', '') or dev.states.get('model', '') or 'unknown'))
+			self._say("{0:<20} {1}".format("Protocol:",     METHOD_LABELS.get(method, "not detected yet") + (" (forced)" if props.get('method', METHOD_AUTO) != METHOD_AUTO else "")))
 			if method == METHOD_ENCRYPTED:
-				self.logger.info("{0:<20} {1}".format("PIN paired:", "yes" if props.get('encToken') else "NO — Edit Device → Pair / Authorize"))
-			self.logger.info("{0:<20} {1}".format("MAC address:",  props.get('macaddress', '') or dev.states.get('macaddress', 'not yet discovered')))
-			self.logger.info("{0:<20} {1}".format("OS:",           dev.states.get('os', 'unknown')))
+				self._say("{0:<20} {1}".format("PIN paired:", "yes" if props.get('encToken') else "NO — Edit Device → Pair / Authorize"))
+			self._say("{0:<20} {1}".format("MAC address:",  props.get('macaddress', '') or dev.states.get('macaddress', 'not yet discovered')))
+			self._say("{0:<20} {1}".format("OS:",           dev.states.get('os', 'unknown')))
 			apps = self._installedApps(dev)
 			if apps:
-				self.logger.info("{0:<20} {1}".format("Installed apps:", ", ".join(sorted(apps.keys()))))
-			self.logger.info("{0:-^130}".format(""))
-		self.logger.info("{0:=^130}".format(""))
+				self._say("{0:<20} {1}".format("Installed apps:", ", ".join(sorted(apps.keys()))))
+			self._say("{0:-^130}".format(""))
+		self._say("{0:=^130}".format(""))
 
 	def _ssdpSearch(self, search_targets, mx):
 		"""Send one SSDP M-SEARCH per target and return the IPs of devices
@@ -843,7 +886,7 @@ class Plugin(indigo.PluginBase):
 		return candidate_ips
 
 	def discoverSamsungTVs(self):
-		self.logger.info("Scanning network for Samsung TVs — this takes about 20 seconds...")
+		self._say("Scanning network for Samsung TVs — this takes about 20 seconds...")
 
 		# Multiple STs maximize coverage across Samsung firmware versions.
 		# ssdp:all catches everything; the narrow STs catch older models that only respond to them.
@@ -872,22 +915,22 @@ class Plugin(indigo.PluginBase):
 				self.logger.debug(f"{ip} did not answer as a Samsung TV — skipping")
 
 		if not found:
-			self.logger.info("No Samsung TVs found. Make sure TVs are powered on and on the same network segment.")
+			self._say("No Samsung TVs found. Make sure TVs are powered on and on the same network segment.")
 			return
 
-		self.logger.info("{0:=^130}".format(f" Found {len(found)} Samsung TV(s) "))
+		self._say("{0:=^130}".format(f" Found {len(found)} Samsung TV(s) "))
 		for ip, result in found.items():
 			info = (result['info'] or {}).get('device', {})
 			status = f"(configured as \"{configured[ip]}\")" if ip in configured else "(not yet configured)"
-			self.logger.info(f"  IP Address:  {ip}  {status}")
-			self.logger.info(f"  Name:        {info.get('name', 'unknown')}")
-			self.logger.info(f"  Model:       {info.get('modelName', 'unknown')}")
-			self.logger.info(f"  Protocol:    {METHOD_LABELS[result['method']]}")
+			self._say(f"  IP Address:  {ip}  {status}")
+			self._say(f"  Name:        {info.get('name', 'unknown')}")
+			self._say(f"  Model:       {info.get('modelName', 'unknown')}")
+			self._say(f"  Protocol:    {METHOD_LABELS[result['method']]}")
 			if result['method'] == METHOD_ENCRYPTED:
-				self.logger.info("               needs one-time PIN pairing (Edit Device → Pair / Authorize)")
-			self.logger.info(f"  MAC:         {info.get('wifiMac', '') or self._macFromArp(ip) or 'unknown'}")
-			self.logger.info("{0:-^130}".format(""))
-		self.logger.info("{0:=^130}".format(""))
+				self._say("               needs one-time PIN pairing (Edit Device → Pair / Authorize)")
+			self._say(f"  MAC:         {info.get('wifiMac', '') or self._macFromArp(ip) or 'unknown'}")
+			self._say("{0:-^130}".format(""))
+		self._say("{0:=^130}".format(""))
 
 	# ---------------------------------------------------------------------------
 	# Small helpers
@@ -1164,11 +1207,11 @@ class Plugin(indigo.PluginBase):
 		entry = self.deviceList.setdefault(device.id, {})
 
 		if self._powerOffInProgress(entry):
-			self.logger.debug(f"\"{device.name}\": power-off in progress — skipping poll")
+			self.logger.log(LOG_DETAILED, f"\"{device.name}\": power-off in progress — skipping poll")
 			self._setOff(device)
 			return
 
-		self.logger.debug(f"Polling {device.name} ({device.id})")
+		self.logger.log(LOG_DETAILED, f"Polling {device.name} ({device.id})")
 
 		method = self._effectiveMethod(device)
 		info = None
@@ -1212,7 +1255,7 @@ class Plugin(indigo.PluginBase):
 		else:
 			tvState = "on"
 		is_on = tvState == "on"
-		self.logger.debug(f"Power state of {device.name}: {tvState}" + ("" if power_state else " (inferred — TV doesn't report PowerState)"))
+		self.logger.log(LOG_DETAILED, f"Power state of {device.name}: {tvState}" + ("" if power_state else " (inferred — TV doesn't report PowerState)"))
 
 		# Clear any previous error badge, and announce success the same way
 		# failures are announced.
@@ -1221,9 +1264,9 @@ class Plugin(indigo.PluginBase):
 		if entry.get('retryCount', 0) > 0 and entry.get('lastFailureKind') == 'unexpected':
 			self.logger.info(f"\"{device.name}\": responding normally again at {ipaddress}")
 		elif not entry.get('everConnected'):
-			self.logger.info(f"\"{device.name}\": connected at {ipaddress} — {METHOD_LABELS.get(method, method)}, TV is {tvState}")
+			self.logger.debug(f"\"{device.name}\": connected at {ipaddress} — {METHOD_LABELS.get(method, method)}, TV is {tvState}")
 		elif previous != tvState:
-			self.logger.info(f"\"{device.name}\" is {tvState}")
+			self.logger.debug(f"\"{device.name}\" is {tvState}")
 		entry['everConnected'] = True
 		entry['retryCount'] = 0
 		entry.pop('lastFailureKind', None)
@@ -1255,11 +1298,11 @@ class Plugin(indigo.PluginBase):
 
 		volume = self._getVolumeUPnP(ipaddress) if is_on else None
 		if volume is not None:
-			self.logger.debug(f"Volume for {device.name}: {volume}")
+			self.logger.log(LOG_DETAILED, f"Volume for {device.name}: {volume}")
 
 		muted = self._getMuteUPnP(ipaddress) if is_on else None
 		if muted is not None:
-			self.logger.debug(f"Mute state for {device.name}: {muted}")
+			self.logger.log(LOG_DETAILED, f"Mute state for {device.name}: {muted}")
 
 		# If an app is running the TV is on the Smart Hub, not a physical input.
 		# Only overwrite currentSource when we can determine it; otherwise leave it
@@ -1295,10 +1338,10 @@ class Plugin(indigo.PluginBase):
 			device_states.append({'key': 'isMuted', 'value': muted})
 
 		if self.detailedDebug:
-			self.logger.info(f"--- States for {device.name} ---")
+			self.logger.log(LOG_DETAILED, f"--- States for {device.name} ---")
 			for state in device_states:
-				self.logger.info(f"  {state['key']:<20} = {state['value']}")
-			self.logger.info(f"--- End states for {device.name} ---")
+				self.logger.log(LOG_DETAILED, f"  {state['key']:<20} = {state['value']}")
+			self.logger.log(LOG_DETAILED, f"--- End states for {device.name} ---")
 
 		device.updateStatesOnServer(device_states)
 		device.updateStateImageOnServer(
@@ -1326,7 +1369,7 @@ class Plugin(indigo.PluginBase):
 			if retry_count == 0 or entry.get('lastFailureKind') != 'network':
 				if seen_before:
 					if device.states.get('status') in ('on', 'standby'):
-						self.logger.info(f"\"{device.name}\" is off (not responding at {ipaddress})")
+						self.logger.debug(f"\"{device.name}\" is off (not responding at {ipaddress})")
 					device.setErrorStateOnServer(None)
 				else:
 					self.logger.warning(
@@ -1335,7 +1378,7 @@ class Plugin(indigo.PluginBase):
 					)
 					device.setErrorStateOnServer("no response")
 			else:
-				self.logger.debug(f"\"{device.name}\": still not responding at {ipaddress} (attempt {retry_count + 1}): {detail}")
+				self.logger.log(LOG_DETAILED, f"\"{device.name}\": still not responding at {ipaddress} (attempt {retry_count + 1}): {detail}")
 			entry['lastFailureKind'] = 'network'
 			self._setOff(device)
 
@@ -1357,7 +1400,7 @@ class Plugin(indigo.PluginBase):
 			if retry_count == 0 or entry.get('lastFailureKind') != 'unexpected':
 				self.logger.error(f"\"{device.name}\": the TV at {ipaddress} answered, but the response couldn't be used: {detail}")
 			else:
-				self.logger.debug(f"\"{device.name}\": unexpected response again (attempt {retry_count + 1}): {detail}")
+				self.logger.log(LOG_DETAILED, f"\"{device.name}\": unexpected response again (attempt {retry_count + 1}): {detail}")
 			entry['lastFailureKind'] = 'unexpected'
 			device.setErrorStateOnServer("error")
 		entry['retryCount'] = retry_count + 1
@@ -1703,7 +1746,7 @@ class Plugin(indigo.PluginBase):
 		Group to be reachable at all."""
 		devices = [d for d in indigo.devices.iter("self") if d.deviceTypeId == "televisions"]
 		if not devices:
-			self.logger.info("No Samsung TV devices are configured")
+			self._say("No Samsung TV devices are configured")
 			return
 		for dev in devices:
 			self._runDiagnosticsForDevice(dev)
@@ -1718,10 +1761,10 @@ class Plugin(indigo.PluginBase):
 
 		def line(n, label, ok, detail):
 			status = 'OK' if ok is True else ('FAILED' if ok is False else str(ok))
-			self.logger.info(f"[{n:<2}] {label:.<44} {status} ({detail})")
+			self._say(f"[{n:<2}] {label:.<44} {status} ({detail})")
 
-		self.logger.info("")
-		self.logger.info("{0:=^100}".format(f" Diagnostics: \"{name}\" "))
+		self._say("")
+		self._say("{0:=^100}".format(f" Diagnostics: \"{name}\" "))
 
 		# 1. IP address format
 		try:
@@ -1729,8 +1772,8 @@ class Plugin(indigo.PluginBase):
 			line(1, "IP address format", True, ip)
 		except ValueError:
 			line(1, "IP address format", False, f"\"{ip}\" is not a valid IP address")
-			self.logger.info("{0:=^100}".format(""))
-			self.logger.error(f"\"{name}\": fix the IP address in this device's config before diagnostics can continue")
+			self._say("{0:=^100}".format(""))
+			self._say(f"\"{name}\": fix the IP address in this device's config before diagnostics can continue", logging.ERROR)
 			return
 
 		# 2. Raw TCP reachability of every port any Samsung protocol uses —
@@ -1816,19 +1859,19 @@ class Plugin(indigo.PluginBase):
 		else:
 			line(7, "MAC address (Wake-on-LAN)", bool(mac), mac or "MISSING — Wake-on-LAN won't work until the TV is seen on once")
 
-		self.logger.info("{0:=^100}".format(""))
+		self._say("{0:=^100}".format(""))
 
 		# Plain-language summary of the most likely cause, based on which
 		# checks passed — so the log doesn't just dump data, it points
 		# somewhere useful.
 		if not any_open:
-			self.logger.warning(f"\"{name}\": nothing answered at {ip}. If the TV is off, that's normal — most Samsung TVs drop off the network in standby. If it's ON, check that its IP ({ip}) matches the TV's own network settings (DHCP may have changed it).")
+			self._say(f"\"{name}\": nothing answered at {ip}. If the TV is off, that's normal — most Samsung TVs drop off the network in standby. If it's ON, check that its IP ({ip}) matches the TV's own network settings (DHCP may have changed it).", logging.WARNING)
 		elif info is None and effective != METHOD_LEGACY:
-			self.logger.error(f"\"{name}\": the TV accepts connections but its REST API didn't respond properly (see [3]) — likely a TLS/firmware issue, not a wrong IP.")
+			self._say(f"\"{name}\": the TV accepts connections but its REST API didn't respond properly (see [3]) — likely a TLS/firmware issue, not a wrong IP.", logging.ERROR)
 		elif not creds_ok:
-			self.logger.error(f"\"{name}\": reachable, but remote control isn't authorized yet (see [6]).")
+			self._say(f"\"{name}\": reachable, but remote control isn't authorized yet (see [6]).", logging.ERROR)
 		else:
-			self.logger.info(f"\"{name}\": diagnostics passed — reachable and controllable via {METHOD_LABELS.get(effective, effective)}.")
+			self._say(f"\"{name}\": diagnostics passed — reachable and controllable via {METHOD_LABELS.get(effective, effective)}.")
 
 	# ---------------------------------------------------------------------------
 	# Relay / switch built-in action handlers

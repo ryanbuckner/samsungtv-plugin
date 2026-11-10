@@ -1,11 +1,11 @@
 <?xml version="1.0"?>
 <MenuItems>
 	<MenuItem id="menu1">
-		<Name>Toggle Debug</Name>
+		<Name>Toggle Debugging</Name>
 		<CallbackMethod>toggleDebugging</CallbackMethod>
 	</MenuItem>
 	<MenuItem id="menu2">
-		<Name>Toggle Detailed State Logging</Name>
+		<Name>Toggle Detailed Debugging</Name>
 		<CallbackMethod>toggleDetailedDebugging</CallbackMethod>
 	</MenuItem>
 	<MenuItem id="menu3">

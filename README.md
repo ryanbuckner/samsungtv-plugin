@@ -17,6 +17,13 @@ This plugin is not endorsed by or affiliated with Samsung.
 
 ---
 
+### What's New in 2026.1.3
+
+- **Standard logging levels.** Plugin Config now has an **Event Logging Level** menu with the same choices as Indigo's own plugins: Detailed Debugging, Debugging, Informational, Warning, Error and Critical. Your current setting carries over (if you had *Critical*, you're now on *Error Messages*).
+- **A quieter event log.** Routine on/off/standby changes the plugin notices in the background are now Debugging messages. Your triggers and Control Pages still see every change.
+- **Menu results always show.** Run Diagnostics, List Configured Device Info and Discover Samsung TVs print their results whatever level you choose.
+- **Clearer messages.** An action with no TV selected (for example, after you deleted and re-created a TV device) now tells you to pick a TV instead of failing with an error. Features a TV is too old for now say so in plain language.
+
 ### What's New in 2026.1.1
 
 - **TVs that change IP address keep working.** If your router gives a TV a new address, the plugin finds it on your network and updates the device for you. You can also run a trigger when that happens. It's on by default, and you can turn it off in the plugin settings.
@@ -91,8 +98,8 @@ That's it. The TV's status shows in Indigo within a few seconds.
 #### Plugin settings (Plugins → SamsungTV → Configure…)
 
 - **Refresh frequency:** how often Indigo checks each TV (default 30 seconds).
-- **Debug Logging:** leave on *Critical* unless you're troubleshooting.
-- **Follow IP address changes:** on by default. If a TV stops answering at its address, the plugin looks for it on your network and updates the device when it finds it.
+- **Event Logging Level:** *Informational Messages* shows what you do and anything that goes wrong. Choose *Warning* or *Error* for a quieter log, or *Debugging* when troubleshooting. Menu commands (Diagnostics, Device Info, Discover) always show their results.
+- **Detect IP address changes:** on by default. If a TV stops answering at its address, the plugin looks for it on your network and updates the device when it finds it.
 - **Look for a missing TV every:** 15, 30, 45 or 60 minutes (default 15). The plugin also looks right away when a different device shows up at a TV's address, and right after you turn a TV on.
 
 > A TV can only be found while it's turned on. If a TV is off, the plugin finds it the next time someone turns it on.
@@ -156,7 +163,7 @@ Add these to Action Groups, Triggers and Schedules (choose **SamsungTV** as the 
 | Discover Samsung TVs on Network | Finds Samsung TVs that are turned on and lists their IP addresses in the event log (takes about 20 seconds) |
 | Run Diagnostics on All TVs | Checks every configured TV and explains any problem in the event log |
 | List Configured Device Info | Lists each TV's IP, model and MAC address in the event log |
-| Toggle Debug / Toggle Detailed State Logging | Extra logging for troubleshooting |
+| Toggle Debugging / Toggle Detailed Debugging | Switch the Event Logging Level for troubleshooting |
 
 ---
 
@@ -210,7 +217,7 @@ plugin.executeAction("setVolume",    deviceId=tv.id, props={"volumeLevel": "20"}
 
 **Start with Plugins → SamsungTV → Run Diagnostics on All TVs.** It checks each TV and writes a plain-English explanation of any problem to the event log.
 
-- **The TV shows "off" but it's on.** The TV's IP address has probably changed. With **Follow IP address changes** on, the plugin finds it within your chosen search interval (or right away when you turn the TV on from Indigo). Otherwise, check the address on the TV (Settings → General → Network → Network Status) and update the device. Either way, reserving the address in your router prevents it.
+- **The TV shows "off" but it's on.** The TV's IP address has probably changed. With **Detect IP address changes** on, the plugin finds it within your chosen search interval (or right away when you turn the TV on from Indigo). Otherwise, check the address on the TV (Settings → General → Network → Network Status) and update the device. Either way, reserving the address in your router prevents it.
 - **The TV shows an "IP changed" badge.** A different device is now using this TV's old address. The plugin is already looking for the TV, and it updates the device as soon as the TV is on.
 - **The TV shows a red "no response" badge.** Indigo has never been able to reach the TV. Usually the IP address is wrong, or the TV was off when you added it. Turn the TV on and click **Detect TV** again.
 - **Status works but buttons don't.** The TV hasn't been paired. Edit the device, click **Pair / Authorize**, and accept the prompt (or enter the PIN) on the TV.
@@ -218,5 +225,5 @@ plugin.executeAction("setVolume",    deviceId=tv.id, props={"volumeLevel": "20"}
 - **The TV keeps asking to Allow.** On the TV, set **Device Connection Manager → Access Notification** to *First time only*.
 - **Discovery doesn't find my TV.** The TV must be fully on and on the same network as the Indigo server. You can always add a TV by its IP address instead.
 
-Still stuck? Set **Debug Logging** to *Debug* in the plugin settings, reproduce the problem, and post the event log on the [Indigo forum](https://forums.indigodomo.com/viewforum.php?f=363).
+Still stuck? Set **Event Logging Level** to *Debugging Messages* in the plugin settings, reproduce the problem, and post the event log on the [Indigo forum](https://forums.indigodomo.com/viewforum.php?f=363).
 

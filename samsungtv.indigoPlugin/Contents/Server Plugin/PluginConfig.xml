@@ -3,13 +3,19 @@
 	<Field id="refresh_frequency" type="textfield" defaultValue="30">
 		<Label>Enter API Refresh Frequency in Seconds:</Label>
 	</Field>
-	<Field id="debugLevel" type="menu" defaultValue="off">
-		<Label>Debug Logging:</Label>
+	<Field id="logLevel" type="menu" defaultValue="20">
+		<Label>Event Logging Level:</Label>
 		<List>
-			<Option value="off">Critical</Option>
-			<Option value="debug">Debug</Option>
-			<Option value="detailed">Detailed State Logging</Option>
+			<Option value="5">Detailed Debugging Messages</Option>
+			<Option value="10">Debugging Messages</Option>
+			<Option value="20">Informational Messages</Option>
+			<Option value="30">Warning Messages</Option>
+			<Option value="40">Error Messages</Option>
+			<Option value="50">Critical Errors Only</Option>
 		</List>
+	</Field>
+	<Field id="logLevelNote" type="label" fontSize="small" fontColor="darkgray">
+		<Label>Shows messages at the chosen level and above. Menu commands (Diagnostics, Device Info, Discover) always show their results. Everything is still written to the plugin's log file.</Label>
 	</Field>
 
 	<Field id="sepIpTracking" type="separator"/>
